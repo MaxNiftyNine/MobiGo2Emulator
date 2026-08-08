@@ -1,0 +1,8 @@
+MobiGo 2 Emulator source code is distributed under the GNU General Public
+License, version 2 or (at your option) any later version. See
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.html for the complete license.
+
+The firmware images in firmware/ are device-derived compatibility inputs and
+are not licensed under the GPL. Their inclusion does not transfer ownership of
+VTech firmware or trademarks.
+

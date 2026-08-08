@@ -1,0 +1,100 @@
+name: Package release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install cmake ninja sdl2 pkg-config
+      - run: python3 scripts/assemble_firmware.py
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - run: cmake --build build --parallel && ctest --test-dir build --output-on-failure
+      - name: Build app bundle
+        run: |
+          APP=dist/MobiGo2Emulator.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/firmware"
+          cp build/mobigo2_emu "$APP/Contents/MacOS/MobiGo2Emulator"
+          cp packaging/Info.plist "$APP/Contents/Info.plist"
+          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin "$APP/Contents/Resources/firmware/"
+          SDL="$(otool -L build/mobigo2_emu | awk '/libSDL2/{print $1; exit}')"
+          cp "$SDL" "$APP/Contents/Frameworks/"
+          install_name_tool -change "$SDL" '@executable_path/../Frameworks/libSDL2-2.0.0.dylib' "$APP/Contents/MacOS/MobiGo2Emulator"
+          codesign --force --deep --sign - "$APP"
+          cp README.md LICENSE dist/
+          ditto -c -k --sequesterRsrc --keepParent "$APP" MobiGo2Emulator-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MobiGo2Emulator-macOS
+          path: MobiGo2Emulator-macOS.zip
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: MobiGo2Emulator-macOS.zip
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libsdl2-dev patchelf
+      - run: python3 scripts/assemble_firmware.py
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - run: cmake --build build --parallel && ctest --test-dir build --output-on-failure
+      - name: Build portable folder
+        run: |
+          ROOT=dist/MobiGo2Emulator
+          mkdir -p "$ROOT/lib" "$ROOT/firmware"
+          cp build/mobigo2_emu "$ROOT/MobiGo2Emulator"
+          cp "$(ldconfig -p | awk '/libSDL2-2.0.so.0/{print $NF; exit}')" "$ROOT/lib/"
+          patchelf --set-rpath '$ORIGIN/lib' "$ROOT/MobiGo2Emulator"
+          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin "$ROOT/firmware/"
+          cp README.md LICENSE "$ROOT/"
+          tar -czf MobiGo2Emulator-Linux-x86_64.tar.gz -C dist MobiGo2Emulator
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MobiGo2Emulator-Linux-x86_64
+          path: MobiGo2Emulator-Linux-x86_64.tar.gz
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: MobiGo2Emulator-Linux-x86_64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-python
+      - shell: msys2 {0}
+        run: |
+          python scripts/assemble_firmware.py
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          mkdir -p dist/MobiGo2Emulator/firmware
+          cp build/mobigo2_emu.exe dist/MobiGo2Emulator/MobiGo2Emulator.exe
+          cp /mingw64/bin/SDL2.dll /mingw64/bin/libgcc_s_seh-1.dll /mingw64/bin/libstdc++-6.dll /mingw64/bin/libwinpthread-1.dll dist/MobiGo2Emulator/
+          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin dist/MobiGo2Emulator/firmware/
+          cp README.md LICENSE dist/MobiGo2Emulator/
+      - shell: pwsh
+        run: Compress-Archive -Path dist/MobiGo2Emulator -DestinationPath MobiGo2Emulator-Windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MobiGo2Emulator-Windows-x86_64
+          path: MobiGo2Emulator-Windows-x86_64.zip
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: MobiGo2Emulator-Windows-x86_64.zip

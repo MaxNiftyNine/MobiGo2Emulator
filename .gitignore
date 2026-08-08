@@ -1,0 +1,9 @@
+/build/
+/dist/
+/firmware/nand.bin
+/firmware/nand.us-stitched.bin
+*.log
+*.profraw
+*.profdata
+.DS_Store
+

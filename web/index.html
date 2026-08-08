@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MobiGo 2 Emulator</title>
+</head>
+<body style="margin: 0; background: white; color: black; text-align: center;">
+  <canvas id="canvas" tabindex="0" width="640" height="480"
+          style="display: block; width: min(100vw, 640px); height: auto; margin: 20px auto 0; image-rendering: pixelated;"
+          oncontextmenu="event.preventDefault()"></canvas>
+  <pre id="log" style="width: min(100vw, 640px); margin: 12px auto; padding: 0 8px; box-sizing: border-box; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere;"></pre>
+  <script>
+    var log = document.getElementById('log');
+    function appendLog(text) {
+      log.textContent += (log.textContent ? '\n' : '') + text;
+      log.scrollTop = log.scrollHeight;
+    }
+    var Module = {
+      canvas: document.getElementById('canvas'),
+      arguments: ['--rom', '/internalrom.bin', '--spi', '/spi.bin', '--nand', '/nand.bin'],
+      print: appendLog,
+      printErr: appendLog
+    };
+  </script>
+  <script src="nand_part01.js"></script>
+  <script src="mobigo2_emu.js"></script>
+</body>
+</html>
