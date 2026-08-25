@@ -48,10 +48,18 @@ jobs:
           # system-font rendering in the launcher.
           dylibbundler -od -b -x "$APP/Contents/MacOS/MobiGo2Emulator" \
             -d "$APP/Contents/Frameworks"
+          # dylibbundler rewrites Homebrew paths to ../libs. Keep its fast
+          # Frameworks traversal, then mirror the resolved closure where those
+          # rewritten install names point and add SDL3 used by SDL2-compat.
+          mkdir -p "$APP/Contents/libs"
+          cp -L "$APP/Contents/Frameworks/"*.dylib "$APP/Contents/libs/"
+          cp -L "$(brew --prefix sdl3)/lib/libSDL3.dylib" \
+            "$APP/Contents/libs/libSDL3.dylib"
           codesign --force --deep --sign - "$APP"
           for binary in \
             "$APP/Contents/MacOS/MobiGo2Emulator" \
-            "$APP/Contents/Frameworks/$SDL_NAME"
+            "$APP/Contents/libs/$SDL_NAME" \
+            "$APP/Contents/libs/libSDL3.dylib"
           do
             minos="$(xcrun vtool -show-build "$binary" | awk '/minos/{print $2; exit}')"
             echo "$binary minimum macOS: $minos"
@@ -62,7 +70,8 @@ jobs:
             --spi "$APP/Contents/Resources/firmware/spi.bin" \
             --nand "$APP/Contents/Resources/firmware/nand.bin" \
             --no-cap --no-window --steps 1 2>dyld-libraries.txt
-          grep 'Contents/Frameworks/.*libSDL2' dyld-libraries.txt
+          grep 'Contents/libs/.*libSDL2' dyld-libraries.txt
+          grep 'Contents/libs/libSDL3.dylib' dyld-libraries.txt
           cp README.md LICENSE dist/
           ditto -c -k --sequesterRsrc --keepParent "$APP" "MobiGo2Emulator-macOS-${{ matrix.architecture }}.zip"
       - uses: actions/upload-artifact@v4
