@@ -133,7 +133,8 @@ int main(int argc, char **argv) {
         // The history rings are diagnostic-only. Fast, unlogged execution can
         // skip their per-instruction modulo/branch bookkeeping without
         // changing any guest-visible CPU or MMIO state.
-        cpu.track_recent_history = true;
+        cpu.track_recent_history =
+            opt.log || opt.trace || opt.trace_transitions;
         rom_boot(bus, cpu, opt.start_pc, opt.start_pc_set);
 
         Video video;
@@ -182,6 +183,11 @@ int main(int argc, char **argv) {
         RealtimeThrottle realtime(window_active && opt.realtime_cap);
         realtime.set_speed_percent(opt.speed_percent);
 #endif
+        // Measure guest time independently of host pacing. The GPL16250 can
+        // switch between its 32.768 kHz source and PLL clocks; treating a
+        // whole sample as if it used only the final clock makes the displayed
+        // speed wildly wrong during normal firmware clock transitions.
+        RealtimeThrottle speed_measurement(window_active && opt.show_speed);
         bool audio_active = false;
         // Host playback is opt-in. Headless and silent runs still advance the
         // emulated DAC/SPU without opening a host audio device.
@@ -257,6 +263,7 @@ int main(int argc, char **argv) {
           realtime.set_enabled(opt.realtime_cap);
           realtime.set_speed_percent(opt.speed_percent);
 #endif
+          speed_measurement.set_enabled(opt.show_speed);
           last_render_insn = cpu.insns >= opt.render_interval
                                  ? cpu.insns - opt.render_interval
                                  : 0;
@@ -281,6 +288,7 @@ int main(int argc, char **argv) {
 #ifndef __EMSCRIPTEN__
           realtime.rebase();
 #endif
+          speed_measurement.rebase();
           if (video.win)
             SDL_SetWindowTitle(video.win, paused ? "MobiGo 2 Emulator - Paused"
                                                  : "MobiGo 2 Emulator");
@@ -299,6 +307,7 @@ int main(int argc, char **argv) {
 #ifndef __EMSCRIPTEN__
           realtime.rebase();
 #endif
+          speed_measurement.rebase();
           if (g_log)
             g_log << "USER RESET start=0x" << std::hex << cpu.lpc() << std::dec
                   << '\n';
@@ -328,7 +337,6 @@ int main(int argc, char **argv) {
         };
         const auto run_started = std::chrono::steady_clock::now();
         auto speed_sample_started = run_started;
-        uint64_t speed_sample_cycles = bus.cycles;
         auto update_speed_title = [&]() {
           if (!video.win || !opt.show_speed)
             return;
@@ -337,9 +345,8 @@ int main(int argc, char **argv) {
               std::chrono::duration<double>(now - speed_sample_started).count();
           if (elapsed < 0.25)
             return;
-          const uint64_t elapsed_cycles = bus.cycles - speed_sample_cycles;
           const double guest_seconds =
-              double(elapsed_cycles) / std::max<uint64_t>(1, bus.system_clock_hz());
+              double(speed_measurement.emulated_nanoseconds) / 1000000000.0;
           const int percent = std::clamp(
               int(std::lround(guest_seconds / elapsed * 100.0)), 0, 9999);
           SDL_SetWindowTitle(video.win,
@@ -347,7 +354,7 @@ int main(int argc, char **argv) {
                               "% speed")
                                  .c_str());
           speed_sample_started = now;
-          speed_sample_cycles = bus.cycles;
+          speed_measurement.rebase();
         };
         auto run_iteration = [&]() -> bool {
           if (quit || cpu.halted)
@@ -480,11 +487,13 @@ int main(int argc, char **argv) {
           uint64_t pace_segment_clock = bus.system_clock_hz();
           uint64_t pace_clock_generation = bus.clock_change_generation;
           auto account_pace_segment = [&]() {
-            if (!realtime.enabled)
+            if (!realtime.enabled && !speed_measurement.enabled)
               return;
             if (bus.cycles >= pace_segment_cycles) {
-              realtime.advance_cycles(bus.cycles - pace_segment_cycles,
-                                      pace_segment_clock);
+              const uint64_t elapsed_cycles = bus.cycles - pace_segment_cycles;
+              realtime.advance_cycles(elapsed_cycles, pace_segment_clock);
+              speed_measurement.advance_cycles(elapsed_cycles,
+                                               pace_segment_clock);
             }
             pace_segment_cycles = bus.cycles;
             pace_segment_clock = bus.system_clock_hz();
@@ -529,7 +538,7 @@ int main(int argc, char **argv) {
               }
             }
             cpu.step();
-            if (realtime.enabled &&
+            if ((realtime.enabled || speed_measurement.enabled) &&
                 bus.clock_change_generation != pace_clock_generation) {
               // The clock-writing instruction completes under the old
               // clock; subsequent instructions use the new selection.
@@ -600,7 +609,10 @@ int main(int argc, char **argv) {
           // emulation batch.  Rendering is deliberately kept independent of
           // CPU pacing: composing and uploading a 320x240 frame thousands of
           // times per second can otherwise make an uncapped session slower.
-          constexpr uint32_t kAutomaticPresentHz = 120;
+          // The stock 48 MHz TFT timings produce roughly 60 frames per second.
+          // Presenting at 120 Hz recomposes and uploads duplicate frames, which
+          // is especially expensive through SDL2-compat's SDL3 Metal backend.
+          constexpr uint32_t kAutomaticPresentHz = 60;
           const uint32_t presentation_hz =
               opt.max_present_hz == 0 ? kAutomaticPresentHz : opt.max_present_hz;
           if (window_active &&

@@ -3,6 +3,7 @@
 #include "ui_font.hpp"
 
 #include <system_error>
+#include <thread>
 #include <SDL_ttf.h>
 
 #ifdef _WIN32
@@ -366,13 +367,22 @@ public:
 
   LaunchRequest run() {
     initialize();
+    auto next_frame = std::chrono::steady_clock::now();
     while (running_) {
       SDL_Event event;
       while (SDL_PollEvent(&event))
         handle_event(event);
       render();
-      if (!vsync_renderer_)
-        SDL_Delay(12);
+      // SDL2-compat can accept the V-Sync renderer flag without making
+      // SDL_RenderPresent block. Explicitly pace the launcher so an idle
+      // library window cannot consume multiple CPU cores rendering duplicate
+      // frames and leave less capacity for a subsequently launched game.
+      next_frame += std::chrono::microseconds(16667);
+      const auto now = std::chrono::steady_clock::now();
+      if (next_frame > now)
+        std::this_thread::sleep_until(next_frame);
+      else
+        next_frame = now;
     }
     return result_;
   }
@@ -383,7 +393,6 @@ private:
   FrontendConfig config_;
   SDL_Window *window_ = nullptr;
   SDL_Renderer *renderer_ = nullptr;
-  bool vsync_renderer_ = false;
   bool running_ = true;
   int mouse_x_ = -1;
   int mouse_y_ = -1;
@@ -412,7 +421,6 @@ private:
       die(SDL_GetError());
     renderer_ = SDL_CreateRenderer(
         window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    vsync_renderer_ = renderer_ != nullptr;
     if (!renderer_)
       renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer_)
