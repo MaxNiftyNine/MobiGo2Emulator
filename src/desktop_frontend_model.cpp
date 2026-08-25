@@ -534,7 +534,11 @@ Options make_launch_options(const Options &defaults,
   options.max_present_hz = 0;
   options.speed_percent = 100;
   options.audio = config.audio;
-  options.vsync = true;
+  // SDL2-compat maps V-Sync presentation to a blocking SDL3 call. With the
+  // emulator's small instruction batches, that can limit guest execution to
+  // one batch per display refresh (roughly 10-20% speed). The real-time
+  // throttle owns guest pacing; presentation is independently capped below.
+  options.vsync = false;
   options.realtime_cap = true;
   options.realtime_cap_explicit = true;
   options.show_speed = config.show_speed;

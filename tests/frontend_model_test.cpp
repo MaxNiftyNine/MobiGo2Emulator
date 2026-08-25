@@ -275,7 +275,7 @@ void test_launch_mapping(const std::filesystem::path &directory) {
           "cartridge launch was not mapped");
   require(options.speed_percent == 100 && options.realtime_cap &&
               options.realtime_cap_explicit && options.max_present_hz == 0 &&
-              options.vsync && !options.show_speed &&
+              !options.vsync && !options.show_speed &&
               options.input_bindings.keys[static_cast<size_t>(BindableControl::Primary)] == SDLK_SPACE,
           "GUI real-time defaults or custom controls were lost");
   require(options.window_scale == 3 && options.fullscreen &&
