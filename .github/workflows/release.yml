@@ -57,6 +57,13 @@ jobs:
           cp -L "$APP/Contents/Frameworks/"*.dylib "$APP/Contents/libs/"
           cp -L "$(brew --prefix sdl3)/lib/libSDL3.dylib" \
             "$APP/Contents/libs/libSDL3.dylib"
+          # The executable and SDL_ttf must resolve the exact same SDL2 image.
+          # Loading the Frameworks and libs copies simultaneously makes SDL's
+          # event, timer, and presentation state diverge and tanks GUI speed.
+          install_name_tool -change \
+            "@executable_path/../Frameworks/$SDL_NAME" \
+            "@executable_path/../libs/$SDL_NAME" \
+            "$APP/Contents/MacOS/MobiGo2Emulator"
           codesign --force --deep --sign - "$APP"
           for binary in \
             "$APP/Contents/MacOS/MobiGo2Emulator" \
@@ -74,6 +81,8 @@ jobs:
             --no-cap --no-window --steps 1 2>dyld-libraries.txt
           grep 'Contents/libs/.*libSDL2' dyld-libraries.txt
           grep 'Contents/libs/libSDL3.dylib' dyld-libraries.txt
+          ! grep 'Contents/Frameworks/.*libSDL2' dyld-libraries.txt
+          test "$(grep -c 'Contents/libs/.*libSDL2-2.0.0.dylib' dyld-libraries.txt)" -eq 1
           cp README.md LICENSE dist/
           ditto -c -k --sequesterRsrc --keepParent "$APP" "MobiGo2Emulator-macOS-${{ matrix.architecture }}.zip"
       - uses: actions/upload-artifact@v4
