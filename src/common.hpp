@@ -115,15 +115,27 @@ inline uint32_t ppu_frame_addr(uint16_t low, uint16_t high) {
 
 inline std::vector<uint8_t> read_file_bytes(const std::filesystem::path &path) {
     std::ifstream f(path, std::ios::binary);
-#ifdef __EMSCRIPTEN__
-    // GitHub Pages has a 100 MiB per-file limit.  The stock NAND image is
-    // shipped as two preloaded Emscripten files and joined at startup.
+    // Git and GitHub Pages cannot carry the 132 MiB NAND as one ordinary
+    // source artifact. Join either the web preload names or the tracked
+    // source-part names when an assembled nand.bin is not present.
     if (!f && path.filename() == "nand.bin") {
-        std::vector<uint8_t> out;
         const std::string encoded_path = path_to_utf8(path);
-        for (const char *suffix : {".part00", ".part01"}) {
-            std::ifstream part(encoded_path + suffix, std::ios::binary);
-            if (!part) die("failed to open " + encoded_path + suffix);
+        const std::array<std::array<std::filesystem::path, 2>, 2> candidates{{
+            {path_from_utf8(encoded_path + ".part00"),
+             path_from_utf8(encoded_path + ".part01")},
+            {path.parent_path() / "nand.us-stitched.bin.part00",
+             path.parent_path() / "nand.us-stitched.bin.part01"},
+        }};
+        const auto parts = std::find_if(
+            candidates.begin(), candidates.end(), [](const auto &pair) {
+                return std::filesystem::is_regular_file(pair[0]) &&
+                       std::filesystem::is_regular_file(pair[1]);
+            });
+        if (parts != candidates.end()) {
+          std::vector<uint8_t> out;
+          for (const std::filesystem::path &part_path : *parts) {
+            std::ifstream part(part_path, std::ios::binary);
+            if (!part) die("failed to open " + path_to_utf8(part_path));
             part.seekg(0, std::ios::end);
             const auto size = part.tellg();
             part.seekg(0, std::ios::beg);
@@ -131,10 +143,12 @@ inline std::vector<uint8_t> read_file_bytes(const std::filesystem::path &path) {
             out.resize(old_size + static_cast<size_t>(size));
             part.read(reinterpret_cast<char *>(out.data() + old_size),
                       static_cast<std::streamsize>(size));
+            if (!part)
+              die("failed while reading " + path_to_utf8(part_path));
+          }
+          return out;
         }
-        return out;
     }
-#endif
     if (!f) die("failed to open " + path_to_utf8(path));
     f.seekg(0, std::ios::end);
     const auto size = f.tellg();
