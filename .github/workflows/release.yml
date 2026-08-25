@@ -44,10 +44,6 @@ jobs:
           SDL_NAME="$(basename "$SDL")"
           cp -L "$SDL" "$APP/Contents/libs/$SDL_NAME"
           install_name_tool -change "$SDL" "@executable_path/../libs/$SDL_NAME" "$APP/Contents/MacOS/MobiGo2Emulator"
-          # Homebrew's SDL2 compatibility library loads SDL3 at runtime, so it
-          # does not appear in the executable's otool dependency list.
-          SDL3="$(brew --prefix sdl3)/lib/libSDL3.dylib"
-          cp -L "$SDL3" "$APP/Contents/libs/libSDL3.dylib"
           # Bundle SDL_ttf and its FreeType/Harfbuzz dependency closure for
           # system-font rendering in the launcher.
           dylibbundler -od -b -x "$APP/Contents/MacOS/MobiGo2Emulator" \
@@ -55,8 +51,7 @@ jobs:
           codesign --force --deep --sign - "$APP"
           for binary in \
             "$APP/Contents/MacOS/MobiGo2Emulator" \
-            "$APP/Contents/libs/$SDL_NAME" \
-            "$APP/Contents/libs/libSDL3.dylib"
+            "$APP/Contents/libs/$SDL_NAME"
           do
             minos="$(xcrun vtool -show-build "$binary" | awk '/minos/{print $2; exit}')"
             echo "$binary minimum macOS: $minos"
@@ -68,7 +63,6 @@ jobs:
             --nand "$APP/Contents/Resources/firmware/nand.bin" \
             --no-cap --no-window --steps 1 2>dyld-libraries.txt
           grep 'Contents/libs/.*libSDL2' dyld-libraries.txt
-          grep 'Contents/libs/libSDL3.dylib' dyld-libraries.txt
           cp README.md LICENSE dist/
           ditto -c -k --sequesterRsrc --keepParent "$APP" "MobiGo2Emulator-macOS-${{ matrix.architecture }}.zip"
       - uses: actions/upload-artifact@v4
