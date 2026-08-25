@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build libsdl2-dev
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build libsdl2-dev libsdl2-ttf-dev
       - run: python3 scripts/assemble_firmware.py
       - name: Configure AddressSanitizer and UndefinedBehaviorSanitizer
         env:
