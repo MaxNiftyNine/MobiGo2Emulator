@@ -160,9 +160,12 @@ build/mobigo2_emu \
   --open-window-on-mba
 ```
 
-Automatic targeting reads the MBA header and selects the matching system (SY),
-legacy game (G1), or menu (MM) slot. The emulator modifies only its in-memory
-NAND copy; the file passed to `--nand` remains byte-for-byte unchanged.
+Automatic targeting always replaces the bootable system-menu (SY) slot. The
+MBA keeps its own declared entry address, so SY, G1, and nonstandard applications
+all follow the same direct-launch path without a role-versus-slot rejection.
+Explicit `system`, `g1`, and `menu` targets remain available for filesystem
+research. The emulator modifies only its in-memory NAND copy; the file passed
+to `--nand` remains byte-for-byte unchanged.
 
 Use `mobigo2_emu --help` for every development, headless, dump, and trace
 option. The emulator always uses its accurate execution model. `--speed-percent`

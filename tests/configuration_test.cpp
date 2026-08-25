@@ -202,17 +202,19 @@ void test_mba_metadata_and_targets() {
 
     const MbaMetadata g1 = inspect_mba_metadata(mba_with_role("MGB_G1"));
     require(g1.detected_target == MbaTarget::G1, "MGB_G1 was not detected");
-    require_throws([&] { resolve_mba_target(g1, MbaTarget::System); },
-                   "conflicting generated role and explicit target were accepted");
+    require(resolve_mba_target(g1, MbaTarget::Auto) == MbaTarget::System,
+            "automatic G1 launch did not use the bootable system slot");
+    require(resolve_mba_target(g1, MbaTarget::System) == MbaTarget::System,
+            "explicit cross-role system launch was rejected");
     std::vector<uint8_t> inconsistent = mba_with_role("MGB_SYS");
     inconsistent[0x14] ^= 1;
-    require_throws([&] { inspect_mba_metadata(inconsistent); },
-                   "inconsistent generated role/profile metadata was accepted");
+    require(inspect_mba_metadata(inconsistent).entry_address == 0x0dfc1c,
+            "role label incorrectly overrode the MBA entry address");
 
     const MbaMetadata unknown = inspect_mba_metadata(mba_with_role("CUSTOM"));
     require(!unknown.detected_target, "unknown MBA title was classified");
-    require_throws([&] { resolve_mba_target(unknown, MbaTarget::Auto); },
-                   "unknown automatic target silently fell back");
+    require(resolve_mba_target(unknown, MbaTarget::Auto) == MbaTarget::System,
+            "unknown MBA did not use the bootable system slot");
     require(resolve_mba_target(unknown, MbaTarget::Menu) == MbaTarget::Menu,
             "verified explicit target did not accept a nonstandard title");
 

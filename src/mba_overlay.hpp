@@ -97,20 +97,8 @@ inline MbaMetadata inspect_mba_metadata(const std::vector<uint8_t> &mba) {
 
     const std::string folded = ascii_lower(metadata.role);
     if (folded == "mgb_sys") {
-        if (mba.size() != 0x174000 || metadata.profile_field_0c != 0x5387a ||
-            metadata.compatibility_address != 0x0f3e60 ||
-            metadata.entry_address != 0x0dfc1d ||
-            metadata.body_load_address != 0x0c8800) {
-            die("MBA overlay: MGB_SYS title conflicts with the validated SY profile");
-        }
         metadata.detected_target = MbaTarget::System;
     } else if (folded == "mgb_g1") {
-        if (mba.size() != 0x214000 || metadata.profile_field_0c != 0x3bc0b ||
-            metadata.compatibility_address != 0x0f3e5c ||
-            metadata.entry_address != 0x0e1a55 ||
-            metadata.body_load_address != 0x0c8800) {
-            die("MBA overlay: MGB_G1 title conflicts with the validated G1 profile");
-        }
         metadata.detected_target = MbaTarget::G1;
     }
     return metadata;
@@ -118,19 +106,11 @@ inline MbaMetadata inspect_mba_metadata(const std::vector<uint8_t> &mba) {
 
 inline MbaTarget resolve_mba_target(const MbaMetadata &metadata,
                                     MbaTarget requested) {
-    if (requested == MbaTarget::Auto) {
-        if (!metadata.detected_target) {
-            die("MBA overlay: automatic target selection requires validated "
-                "MGB_SYS or MGB_G1 profile metadata; select a verified "
-                "nonstandard target explicitly in the internal caller");
-        }
-        return *metadata.detected_target;
-    }
-    if (metadata.detected_target && *metadata.detected_target != requested) {
-        die(std::string("MBA overlay: header role ") + metadata.role +
-            " conflicts with requested target " + mba_target_name(requested));
-    }
-    return requested;
+    (void)metadata;
+    // Direct application launches replace the system-menu slot regardless of
+    // the MBA's role label. G1 and nonstandard MBAs retain their own entry
+    // address and ABI; only the firmware-visible file used to reach them is SY.
+    return requested == MbaTarget::Auto ? MbaTarget::System : requested;
 }
 
 namespace mba_overlay_detail {
