@@ -6,11 +6,21 @@
 namespace mobigo {
 
 struct Bus {
-    std::vector<uint16_t> mem = std::vector<uint16_t>(kWordCount, 0);
+    // On-chip RAM occupies the unbanked address space below the first external
+    // chip select. External SDRAM and cartridge storage have their own backing
+    // arrays, so allocating the full 22-bit address space here only wastes
+    // memory and cache capacity.
+    std::vector<uint16_t> mem = std::vector<uint16_t>(kCsBase, 0);
     // The cartridge connector is wired to the board's CS3 NOR window.  Keep
     // it separate from SDRAM: both are externally addressed devices, but
     // writes used to load runtime modules into SDRAM must never alter a cart.
     std::vector<uint16_t> cart_mem;
+    bool cart_aperture_dirty = true;
+    uint32_t cached_cart_cs3_start = 0;
+    uint32_t cached_cart_cs3_words = 0;
+    uint32_t cached_cart_index_mask = 0;
+    size_t cached_cart_words = 0;
+    bool cached_cart_power_of_two = false;
     std::vector<uint16_t> sdram = std::vector<uint16_t>(kSdramWords, 0xffff);
     std::array<uint16_t, 0x1000> mmio{};
     std::array<uint16_t, 0x100> rowscroll_ram{};
@@ -561,6 +571,7 @@ struct Bus {
         // remain undocumented, but 0x0300 is directly required by this ROM.
         mmio[0x7ae2 - kMmioBase] = 0x0300;
         mmio[0x7869 - kMmioBase] = 0x0010; // GPIO-B SPI NOR CS idle high.
+        cart_aperture_dirty = true;
     }
 
     void system_reset(bool preserve_memory = false) {
@@ -725,22 +736,25 @@ struct Bus {
                addr == 0x7878 || addr == 0x7880;
     }
 
-    void update_power_latch() {
+    void update_power_latch(uint32_t written_addr) {
         static constexpr uint16_t kPowerLatch = 0x0010; // GPIO-D4
-        const bool output = (mmio[0x787a - kMmioBase] & kPowerLatch) != 0;
-        const bool normal_polarity =
-            (mmio[0x787b - kMmioBase] & kPowerLatch) != 0;
+        const uint16_t direction = mmio[0x787a - kMmioBase];
+        const uint16_t attribute = mmio[0x787b - kMmioBase];
+        const bool resident_power_configuration =
+            direction == kPowerLatch && attribute == kPowerLatch;
         const bool high = (mmio[0x7879 - kMmioBase] & kPowerLatch) != 0;
 
-        // Ignore a cold/unconfigured low level. The physical shutdown edge is
-        // only meaningful after firmware has established D4 as the active-high
-        // power-hold output.
-        if (output && normal_polarity && high) {
+        // request_poweroff() gives the power-hold pin exclusive ownership of
+        // GPIO-D and releases it through the Buffer register. Retail software
+        // also clears Buffer while initializing all sixteen GPIO-D pins as a
+        // port (Direction/Attribute == 0xffff); that generic initialization is
+        // not the resident's terminal power request.
+        if (resident_power_configuration && high) {
             power_latch_seen_high = true;
             return;
         }
-        if (!power_latch_seen_high || !output || !normal_polarity || high ||
-            poweroff_requested) {
+        if (written_addr != 0x7879 || !power_latch_seen_high ||
+            !resident_power_configuration || high || poweroff_requested) {
             return;
         }
 
@@ -843,11 +857,45 @@ struct Bus {
         }
         if (internal_rom_base_contains(addr)) return internal_rom_base_read(addr);
         if (internal_rom_shadow_contains(addr)) return internal_rom_shadow_read(addr);
+
+        // Instruction fetch is the interpreter's hottest bus operation. Once
+        // the ROM/MMIO overlays above have been resolved, unlogged execution
+        // needs none of read()'s device routing and diagnostic machinery.
+        // Logged fetches deliberately retain all low-RAM and external-bus
+        // diagnostic hooks in read().
+        if (!g_log.is_open()) {
+            if (addr < kCsBase) return mem[addr];
+            if (addr < 0x200000) return cs_read(addr - kCsBase);
+            const uint32_t bank = mmio[0x7810 - kMmioBase] & 0x3f;
+            const int64_t real = int64_t(addr - 0x200000) +
+                                 int64_t(bank) * 0x200000 - kCsBase;
+            return real >= 0 ? cs_read(uint32_t(real)) : 0;
+        }
         return read(addr);
     }
 
     uint16_t read(uint32_t addr) {
         addr &= kAddrMask;
+        // Data traffic normally runs without a diagnostic log. Keep that
+        // path free of the many range-specific watchpoints below; logged runs
+        // retain the existing routing and every diagnostic side effect.
+        if (!g_log.is_open()) {
+            if (addr >= 0x7c00 && addr <= 0x7fff)
+                return sound_ram[addr - 0x7c00];
+            if (addr >= kMmioBase && addr <= kMmioEnd)
+                return read_mmio(addr);
+            if (internal_rom_base_contains(addr))
+                return internal_rom_base_read(addr);
+            if (addr >= kCsBase && addr < 0x200000)
+                return cs_read(addr - kCsBase);
+            if (addr >= 0x200000) {
+                const uint32_t bank = mmio[0x7810 - kMmioBase] & 0x3f;
+                const int64_t real = int64_t(addr - 0x200000) +
+                                     int64_t(bank) * 0x200000 - kCsBase;
+                return real >= 0 ? cs_read(uint32_t(real)) : 0;
+            }
+            return mem[addr];
+        }
         if (addr >= 0x7c00 && addr <= 0x7fff) {
             const uint16_t value = sound_ram[addr - 0x7c00];
             if (g_log) log_a6fa_bus("READ", addr, value);
@@ -954,6 +1002,36 @@ struct Bus {
 
     void write(uint32_t addr, uint16_t value) {
         addr &= kAddrMask;
+        // Mirror read()'s unlogged fast path. The ordering matches the full
+        // router exactly, including sound RAM's priority over the MMIO window
+        // and ignored stores into the internal ROM aperture.
+        if (!g_log.is_open()) {
+            if (addr >= 0x7c00 && addr <= 0x7fff) {
+                const uint32_t sound_offset = addr - 0x7c00;
+                sound_ram[sound_offset] = value;
+                if (sound_offset < 0x200 && (sound_offset & 0x0f) <= 1)
+                    ++spu_channel_start_sequence[sound_offset >> 4];
+                return;
+            }
+            if (addr >= kMmioBase && addr <= kMmioEnd) {
+                write_mmio(addr, value);
+                return;
+            }
+            if (internal_rom_base_contains(addr)) return;
+            if (addr >= kCsBase && addr < 0x200000) {
+                cs_write(addr - kCsBase, value);
+                return;
+            }
+            if (addr >= 0x200000) {
+                const uint32_t bank = mmio[0x7810 - kMmioBase] & 0x3f;
+                const int64_t real = int64_t(addr - 0x200000) +
+                                     int64_t(bank) * 0x200000 - kCsBase;
+                if (real >= 0) cs_write(uint32_t(real), value);
+                return;
+            }
+            mem[addr] = value;
+            return;
+        }
         if (addr >= 0x7c00 && addr <= 0x7fff) {
             const uint32_t sound_offset = addr - 0x7c00;
             sound_ram[sound_offset] = value;
@@ -1074,16 +1152,33 @@ struct Bus {
         return start;
     }
 
-    bool cart_address(uint32_t offset, uint32_t &cart_offset) const {
-        if (cart_mem.empty()) return false;
-        const uint32_t physical = offset + kCsBase;
-        const uint32_t cs3_start = mcs_start(3);
-        const uint32_t cs3_words =
+    void refresh_cart_aperture() {
+        if (!cart_aperture_dirty && cached_cart_words == cart_mem.size()) return;
+        cached_cart_cs3_start = mcs_start(3);
+        cached_cart_cs3_words =
             uint32_t(((mmio[0x7823 - kMmioBase] >> 8) & 0xff) + 1) << 16;
-        if (physical < cs3_start || physical - cs3_start >= cs3_words) return false;
+        cached_cart_words = cart_mem.size();
+        cached_cart_power_of_two = cached_cart_words != 0 &&
+            cached_cart_words <= UINT32_MAX && std::has_single_bit(cached_cart_words);
+        cached_cart_index_mask = cached_cart_power_of_two
+            ? uint32_t(cached_cart_words - 1) : 0;
+        cart_aperture_dirty = false;
+    }
+
+    bool cart_address(uint32_t offset, uint32_t &cart_offset) {
+        if (cart_mem.empty()) return false;
+        refresh_cart_aperture();
+        const uint32_t physical = offset + kCsBase;
+        if (physical < cached_cart_cs3_start ||
+            physical - cached_cart_cs3_start >= cached_cart_cs3_words) {
+            return false;
+        }
         // The dump is an 8M-word NOR while CS3 is configured for a 16M-word
         // aperture.  The unconnected top address line mirrors the fitted ROM.
-        cart_offset = (physical - cs3_start) % uint32_t(cart_mem.size());
+        const uint32_t relative = physical - cached_cart_cs3_start;
+        cart_offset = cached_cart_power_of_two
+            ? relative & cached_cart_index_mask
+            : uint32_t(size_t(relative) % cached_cart_words);
         return true;
     }
 
@@ -2952,6 +3047,7 @@ struct Bus {
             return;
         }
         mmio[addr - kMmioBase] = value;
+        if (addr >= 0x7820 && addr <= 0x7823) cart_aperture_dirty = true;
         if (addr == 0x7050 || addr == 0x7051 ||
             addr == 0x7054 || addr == 0x7055) {
             next_video_edge_cycles = 0;
@@ -2961,7 +3057,7 @@ struct Bus {
             // external pad state, while BUFFER reads back the last written data.
             mmio[addr + 1 - kMmioBase] = value;
         }
-        if (addr >= 0x7878 && addr <= 0x787b) update_power_latch();
+        if (addr >= 0x7878 && addr <= 0x787b) update_power_latch(addr);
         if (addr >= 0x7880 && addr <= 0x7883) update_accelerometer_i2c();
         switch (addr) {
         case 0x7000: case 0x7001: case 0x7002: case 0x7003:
@@ -3417,8 +3513,7 @@ struct Bus {
             // MBA headers begin "bM_gbMQa"; entry and load base are 32-bit
             // word addresses at byte offsets 0x14 and 0x18. Discovering the
             // header in the normal DMA load path lets strict lifecycle/video
-            // behavior apply to MBAs already present in a supplied NAND, not
-            // only files injected with --mba.
+            // behavior apply to MBAs already present in a supplied NAND.
             if (magic0 == 0x675f4d62 && magic1 == 0x61514d62) {
                 const uint32_t entry = read32(dst + 0x0a) & kAddrMask;
                 const uint32_t base_addr = read32(dst + 0x0c) & kAddrMask;

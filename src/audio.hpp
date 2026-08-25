@@ -79,6 +79,7 @@ struct Audio {
     int16_t direct_b = 0;
     uint32_t active_channels = 0;
     bool timeline_started = false;
+    bool muted = false;
 
     struct MixCache {
         uint32_t active = 0;
@@ -116,6 +117,14 @@ struct Audio {
         if (device) SDL_CloseAudioDevice(device);
         device = 0;
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    }
+
+    void set_muted(bool should_mute) {
+        muted = should_mute;
+        host_staging.clear();
+        if (!device) return;
+        SDL_ClearQueuedAudio(device);
+        SDL_PauseAudioDevice(device, muted ? 1 : 0);
     }
 
     uint32_t rate() const {
@@ -573,7 +582,6 @@ struct Audio {
     void render(Bus &bus, uint64_t frames) {
         output.clear();
         output.reserve(size_t(frames) * 2);
-        sync_channels(bus);
         const MixCache cache = prepare_mix(bus);
         const uint32_t source_rate = dac_source_rate(bus);
         const bool output_gate =
@@ -601,7 +609,7 @@ struct Audio {
     }
 
     void queue_host_output() {
-        if (!device || output.empty()) return;
+        if (!device || muted || output.empty()) return;
         host_staging.insert(host_staging.end(), output.begin(), output.end());
         if (host_staging.size() < kHostQueueFrames * 2) return;
         if (SDL_QueueAudio(device, host_staging.data(),
@@ -623,6 +631,12 @@ struct Audio {
             return;
         }
 
+        // Control descriptors are guest-visible immediately, even when no
+        // host sample boundary falls between two pumps. Keeping this outside
+        // render() observes same-cycle starts/stops without adding another
+        // scan to ordinary frame-producing pumps.
+        sync_channels(bus);
+
         const uint64_t elapsed = bus.cycles - last_cycles;
         last_cycles = bus.cycles;
         const uint64_t clock = bus.system_clock_hz();
@@ -638,7 +652,8 @@ struct Audio {
         // Keep audible runs close to real time and cap latency. Startup before
         // the first hardware audio enable remains unthrottled.
         const Uint32 bytes_per_second = rate() * 2 * sizeof(int16_t);
-        while (device && SDL_GetQueuedAudioSize(device) > bytes_per_second / 8) {
+        while (device && !muted &&
+               SDL_GetQueuedAudioSize(device) > bytes_per_second / 8) {
             SDL_Delay(1);
         }
     }

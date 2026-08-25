@@ -54,35 +54,115 @@ void require_throws(Function &&function, const char *message) {
     throw std::runtime_error(message);
 }
 
-void test_modes_and_cli() {
+void test_cli_surface() {
     const Options defaults = options({});
-    require(defaults.mode == EmulatorMode::Accurate, "default mode is not accurate");
     require(defaults.realtime_cap, "accurate mode unexpectedly disabled pacing");
-    require(!defaults.auto_power_wake, "accurate mode automatically wakes power-off");
+    require(defaults.speed_percent == 100, "default speed is not real-time");
+    require(defaults.show_speed, "live speed display is not enabled by default");
+    require(!defaults.auto_power_wake, "default settings automatically wake power-off");
+    require(defaults.audio && defaults.vsync,
+            "argument-free desktop launch did not enable audio and vsync");
 
-    const Options fast = options({"--mode", "fast"});
-    require(fast.mode == EmulatorMode::Fast, "fast mode was not parsed");
-    require(!fast.realtime_cap, "fast mode did not disable host pacing");
-    const Options capped_fast = options({"--mode", "fast", "--cap"});
-    require(capped_fast.realtime_cap, "explicit --cap did not override fast mode");
+    const Options custom_speed = options({"--speed-percent", "150", "--no-cap", "--hide-speed"});
+    require(custom_speed.speed_percent == 150 && !custom_speed.realtime_cap &&
+                !custom_speed.show_speed,
+            "speed, pacing, or live-speed controls were not parsed");
     const Options wake = options({"--auto-power-wake"});
     require(wake.auto_power_wake, "explicit automatic power wake was ignored");
 
-    require(options({"--mba", "test.MBA", "--mba-target", "SY"}).mba_target ==
-                MbaTarget::System,
-            "SY target alias failed");
-    require(options({"--mba", "test.MBA", "--mba-slot", "G1"}).mba_target ==
-                MbaTarget::G1,
-            "G1 slot alias failed");
-    require(options({"--mba", "test.MBA", "--mba-target", "MM"}).mba_target ==
-                MbaTarget::Menu,
-            "MM target alias failed");
-    require_throws([] { options({"--open-window-on-mba"}); },
-                   "MBA-triggered window did not require an MBA");
-    require_throws([] {
-        options({"--mba", "test.MBA", "--open-window-on-mba",
-                 "--open-window-at", "1"});
-    }, "conflicting deferred-window triggers were accepted");
+    for (const char *removed : {"--mode", "--mba", "--mba-target", "--mba-slot",
+                                "--boot", "--usb", "--open-window-on-mba"}) {
+        require_throws([&] { options({removed}); },
+                       "removed launcher option was still accepted");
+    }
+    require_throws([] { options({"--speed-percent", "24"}); },
+                   "unsafe speed percentage was accepted");
+
+    const char *unicode_path = "games/café_日本.bin";
+    const Options unicode = options({"--cart", unicode_path,
+                                     "--log-file", unicode_path,
+                                     "--dump-current-frame", unicode_path});
+    require(path_to_utf8(unicode.cart) == unicode_path &&
+                path_to_utf8(unicode.log_path) == unicode_path &&
+                path_to_utf8(unicode.dump_current_frame) == unicode_path,
+            "UTF-8 CLI paths did not round-trip through filesystem::path");
+}
+
+void test_automation_cli_contract() {
+    // Preserve the regular firmware/cart automation surface while deliberately
+    // excluding the retired MBA, USB, boot-path, and execution-mode options.
+    const Options run = options({
+        "--rom", "firmware/internalrom.bin",
+        "--spi", "firmware/spi.bin",
+        "--nand", "firmware/nand.us-stitched.bin",
+        "--cart", "games/cartridge.bin",
+        "--speed-percent", "125",
+        "--no-cap",
+        "--audio",
+    });
+    require(run.rom == "firmware/internalrom.bin", "starter --rom path changed");
+    require(run.spi == "firmware/spi.bin", "starter --spi path changed");
+    require(run.nand == "firmware/nand.us-stitched.bin", "starter --nand path changed");
+    require(run.cart == "games/cartridge.bin", "cart path changed");
+    require(run.speed_percent == 125 && !run.realtime_cap,
+            "automation speed or pacing setting changed");
+    require(run.audio && !run.vsync,
+            "explicit starter audio changed unrelated CLI defaults");
+
+    const Options regular = options({
+        "--rom", "internalrom.bin", "--spi", "spi.bin",
+        "--nand", "nand.edited.bin", "--open-window-at", "220000000",
+    });
+    require(regular.realtime_cap, "regular CLI launch was not paced");
+    require(regular.open_window_at == 220000000,
+            "deferred-window threshold changed");
+    require(!regular.audio && !regular.vsync,
+            "ordinary CLI invocation inherited desktop-only defaults");
+
+    const Options uncapped = options({
+        "--rom", "internalrom.bin", "--spi", "spi.bin",
+        "--nand", "nand.edited.bin", "--open-window-at", "220000000",
+        "--no-cap", "--max-present-hz", "30",
+    });
+    require(!uncapped.realtime_cap && uncapped.max_present_hz == 30,
+            "automation pacing options changed");
+
+    // Shared verification scripts use this deterministic headless surface.
+    const Options verify = options({
+        "--rom", "internalrom.bin", "--spi", "spi.bin", "--nand", "nand.bin",
+        "--cart", "game.bin", "--no-cap",
+        "--no-window", "--steps", "500000000",
+        "--dump-frame", "final.bmp", "--dump-frame-dir", "frames",
+        "--dump-frame-interval", "4300000",
+        "--dump-memory", "state.bin", "--dump-memory-base", "0x5800",
+        "--dump-memory-words", "0x20", "--log", "--log-file", "run.log",
+        "--start-logging-at", "200000000",
+        "--touch-event", "300000000,10000000,160,180",
+        "--key-event", "245000000,5000000,volup",
+    });
+    require(!verify.window && verify.max_steps == 500000000,
+            "starter headless bounded execution changed");
+    require(verify.dump_frame == "final.bmp" && verify.dump_frame_dir == "frames" &&
+                verify.dump_frame_interval == 4300000,
+            "starter framebuffer evidence options changed");
+    require(verify.dump_memory == "state.bin" &&
+                verify.dump_memory_base == 0x5800 && verify.dump_memory_words == 0x20,
+            "starter memory evidence options changed");
+    require(verify.log && verify.log_path == "run.log" &&
+                verify.start_logging_at == 200000000,
+            "starter logging options changed");
+    require(verify.scripted_touches.size() == 1 &&
+                verify.scripted_touches[0].at == 300000000 &&
+                verify.scripted_touches[0].duration == 10000000 &&
+                verify.scripted_touches[0].x == 160 &&
+                verify.scripted_touches[0].y == 180,
+            "starter scripted touch option changed");
+    require(verify.scripted_key_transitions.size() == 2 &&
+                verify.scripted_key_transitions[0].at == 245000000 &&
+                verify.scripted_key_transitions[0].pressed &&
+                verify.scripted_key_transitions[1].at == 250000000 &&
+                !verify.scripted_key_transitions[1].pressed,
+            "starter scripted key option changed");
 }
 
 void test_matrix_map() {
@@ -235,7 +315,8 @@ void test_selected_mba_entry_is_pinned() {
 
 int main() {
     try {
-        test_modes_and_cli();
+        test_cli_surface();
+        test_automation_cli_contract();
         test_matrix_map();
         test_mba_metadata_and_targets();
         test_realtime_rebase();

@@ -5,12 +5,11 @@ the emulator. Anything marked `ASSUMPTION` or `TODO` should be treated as
 incomplete hardware knowledge, not as verified behavior.
 
 This is a chronological evidence log, not an application or emulator usage
-guide. Current commands live in [`emulator/README.md`](README.md); current
-support boundaries live in the
-[capability matrix](../docs/testing/capability-matrix.md). Bare capture names
-below are historical labels. Maintained firmware paths are under
-`vendor/firmware/`, and the assembled NAND is
-`vendor/firmware/nand.us-stitched.bin`.
+guide. Current commands live in [README.md](README.md), the implementation map
+and accuracy rules live in [ARCHITECTURE.md](ARCHITECTURE.md), and executable
+coverage lives under `tests/`. Bare capture names and paths below are historical
+labels. Maintained standalone firmware paths are under `firmware/`; the
+assembled NAND is `firmware/nand.bin`.
 
 ## Evidence inventory
 
@@ -104,9 +103,8 @@ below are historical labels. Maintained firmware paths are under
   - `0x007000..0x007fff`: internal peripherals
   - `0x008000..0x027fff`: 128 Kword internal ROM region
   - `0x030000+`: external chip-select space
-- With `mobigo2_pinstream_a_first512_128k.bin` present, the emulator now defaults to internal-ROM
-  reset-vector boot instead of the synthetic SPI copy. The old synthetic copy remains
-  available as `--boot spi-shim` only for comparison/debugging.
+- With `mobigo2_pinstream_a_first512_128k.bin` present, the emulator uses the
+  internal-ROM reset-vector boot sequence rather than the old synthetic SPI copy.
 - `vendor/firmware/internalrom.bin` currently matches the verified pinstream ROM
   SHA-256 (`883e2d2111bf978af1b98fcf34f577c46739da8778c1cec592be79a6f6b4d5d5`),
   and the maintained launcher supplies that repository path explicitly rather
@@ -536,10 +534,6 @@ below are historical labels. Maintained firmware paths are under
   many logged invalid-ALU no-op workarounds and mirrored high-segment fetches.
   This confirms the new dump changes behavior compared with the old dump, but
   the path is not a valid emulation result.
-- `./build/mobigo2_emu --boot spi-shim --no-window --steps 200000` currently
-  halts at `PC=0x120d`, opcode `0x8082`, due to the missing `op1 == 2`
-  interpreter form. This is a CPU-core regression/blocker to resolve before
-  using the old synthetic SPI path for long-run video work again.
 - Before correcting NAND page/column translation,
   `./build/mobigo2_emu --no-window --steps 30000000 --dump-frame
   build/frame_30m_irq.bmp` stopped at `PC=0x1160`, the external loader's
@@ -718,6 +712,38 @@ below are historical labels. Maintained firmware paths are under
   enable/status distinction, W1C channel event, and both interrupt routes.
 - Deterministic integration runs now advance Guest to the title screen and the
   saved profile into the following animated scene.
+
+## Three supplied retail cartridge regressions (2026-08-23)
+
+- **Emulator-observed:** Toy Story 3 stopped at instruction `476,622,489`
+  (`PC=0x28ae13`) and Shrek Forever After stopped at `476,622,579`
+  (`PC=0x276948`). Both reached the same legacy runtime initialization that
+  programs all of GPIO-D (`Buffer=0`, `Direction=Attribute=0xffff`). The old
+  power-latch model treated that ordinary whole-port clear as a terminal D4
+  falling edge because firmware had previously held D4 high.
+- The resident Off routine uses a distinct D4-only terminal sequence
+  (`Direction=Attribute=0x0010` and a Buffer write that releases D4). Power-off
+  detection now recognizes that deliberate configuration instead of treating
+  any all-port initialization as shutdown. A counter-test still reaches the
+  real Off state at approximately 437.6 million instructions, `PC=0x3a500`;
+  the exact boundary varies with the scripted key-hold duration.
+- Mickey remained CPU-active beyond 800 million instructions; its apparent
+  freeze was display selection. All three cartridges switch
+  `P_PPU_Enable` to direct page/sprite mode (`0x0063`, frame-base bit `0x0080`
+  clear) while nonzero FBI/FBO values inherited from the resident remain in
+  their registers. `Video::compose()` had used pointer plausibility to suppress
+  direct rendering and then restored the stale resident framebuffer. Direct
+  PPU output now takes precedence whenever frame-base mode is clear, while the
+  separate inherited-MBA interrupt guard is checked before any pixels mutate.
+- Integrated scripted runs select each cartridge at 410 million instructions,
+  select Guest at 530 million, and reach 750 million without a halt. Toy Story
+  advances through Disney/Pixar/title art (`PC=0x242c0a`), Shrek reaches title
+  art (`PC=0x2762ea`), and Mickey advances through its Disney fade
+  (`PC=0x305e7`). Before the scanout fix all three current frames shared the
+  stale hash prefix `67cc3d865efa`; their corrected final frame hash prefixes
+  are respectively `c6ac4e7fbf88`, `740c1f4d32e8`, and `15d8bcf3a60a`.
+- Synthetic regressions express the GPIO-D and PPU mode rules without embedding
+  cartridge bytes or matching title names.
 
 - Remaining accuracy work includes exact E-Fuse meanings, complete
   timer/counter slot behavior, row-zoom/transform effects, exact SPU

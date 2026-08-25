@@ -171,6 +171,106 @@ static void test_gpio_d4_power_latch_falling_edge() {
     bus.system_reset();
     require(!bus.power_latch_seen_high && !bus.poweroff_requested,
             "system reset retained the GPIO power-off latch state");
+
+    // Retail cartridges initialize GPIO-D as a complete port. Their ordinary
+    // all-pins Buffer clear must not be confused with the resident's dedicated
+    // D4 terminal sequence, even if firmware held D4 high beforehand.
+    bus.write(0x787b, 0x0010);
+    bus.write(0x787a, 0x0010);
+    bus.write(0x7879, 0x0010);
+    bus.write(0x787b, 0xffff);
+    bus.write(0x787a, 0xffff);
+    bus.write(0x7879, 0x0000);
+    bus.write(0x7878, 0x0000);
+    require(!bus.poweroff_requested,
+            "whole-port GPIO-D initialization was mistaken for power-off");
+}
+
+static void test_bus_backing_stops_at_external_chip_select() {
+    Bus bus;
+    require(bus.mem.size() == kCsBase,
+            "on-chip RAM backing still allocates the full external address space");
+
+    bus.write(kCsBase - 1, 0x1234);
+    bus.write(kCsBase, 0xabcd);
+    require(bus.read(kCsBase - 1) == 0x1234,
+            "last on-chip RAM word did not round-trip");
+    require(bus.read(kCsBase) == 0xabcd && bus.sdram[0] == 0xabcd,
+            "first external word did not route to SDRAM");
+}
+
+static void test_unlogged_bus_router_matches_diagnostic_routing() {
+    const auto exercise_router = []() {
+        Bus bus;
+        bus.internal_rom_base = 0x008000;
+        bus.internal_rom = {0xabcd};
+        bus.cart_mem = {0x6000, 0x6001, 0x6002, 0x6003};
+
+        bus.write(0x001234, 0x1111);
+        bus.write(0x007c00, 0x2222);
+        bus.write(0x008000, 0xffff); // Internal ROM stores are ignored.
+        bus.write(0x030100, 0x3333);
+        const uint16_t cart_before = bus.read(0x050000);
+        bus.write(0x050000, 0xffff); // Cartridge stores are ignored.
+        bus.write(0x007824, 0x4444);
+        bus.write(0x200100, 0x5555);
+
+        return std::array<uint32_t, 9>{
+            bus.read(0x001234),
+            bus.read(0x007c00),
+            bus.spu_channel_start_sequence[0],
+            bus.read(0x008000),
+            bus.read(0x030100),
+            cart_before,
+            bus.read(0x050000),
+            bus.read(0x007824),
+            bus.read(0x200100),
+        };
+    };
+
+    if (g_log.is_open()) g_log.close();
+    g_log.clear();
+    const auto unlogged = exercise_router();
+
+    const auto log_path = std::filesystem::temp_directory_path() /
+        ("mobigo2-bus-router-" +
+         std::to_string(std::chrono::steady_clock::now()
+                            .time_since_epoch().count()) +
+         ".log");
+    g_log.open(log_path, std::ios::out | std::ios::trunc);
+    require(g_log.is_open(), "failed to create temporary bus diagnostic log");
+    const auto logged = exercise_router();
+    g_log.close();
+    g_log.clear();
+    std::error_code remove_error;
+    std::filesystem::remove(log_path, remove_error);
+
+    require(unlogged == logged,
+            "unlogged bus fast path diverged from diagnostic routing");
+}
+
+static void test_cart_aperture_cache_tracks_mcs_and_rom_size() {
+    Bus bus;
+    bus.cart_mem = {0x1000, 0x1001, 0x1002, 0x1003};
+
+    // With the reset one-page MCS0..2 sizes, CS3 begins at word 0x50000.
+    require(bus.read(0x050000) == 0x1000 && bus.read(0x050006) == 0x1002,
+            "power-of-two cartridge mirroring is incorrect");
+
+    // Enlarging MCS0 moves CS3 by one 64K-word page. Guest MMIO writes must
+    // invalidate the cached aperture immediately.
+    bus.write(0x7820, 0x0100);
+    bus.write(0x050000, 0x55aa);
+    require(bus.read(0x050000) == 0x55aa,
+            "old cartridge aperture remained active after MCS reprogramming");
+    require(bus.read(0x060000) == 0x1000,
+            "cartridge aperture did not follow MCS reprogramming");
+
+    // Cartridge loaders/tests may replace the backing vector directly. Size
+    // changes refresh the mask and retain modulo mirroring for odd-sized NOR.
+    bus.cart_mem = {0x2000, 0x2001, 0x2002};
+    require(bus.read(0x060004) == 0x2001,
+            "non-power-of-two cartridge mirroring is incorrect");
 }
 
 static void test_mba_entry_return_is_an_application_exit() {
@@ -221,6 +321,24 @@ static void test_mba_scanout_requires_inherited_interrupt_service() {
     video.compose(bus, cpu, false);
     require(video.pixels[0] == Video::rgb565_to_argb(0xf800),
             "interrupt-serviced MBA did not latch its framebuffer");
+
+    // The same inherited-display guard applies when an MBA programs direct
+    // page/sprite mode. Rendering before checking the guard would silently
+    // replace the latched resident frame even though compose() returned early.
+    video.pixels.assign(Video::W * Video::H, 0xff123456u);
+    bus.mmio[0x707f - kMmioBase] = 0x0000;
+    bus.mmio[0x7042 - kMmioBase] = 0x0003;
+    bus.sprite_ram[0] = 1;
+    bus.palette_ram[0] = 0x7fff;
+    cpu.enable_irq = 0;
+    video.compose(bus, cpu, false);
+    require(video.pixels[0] == 0xff123456u,
+            "interrupt-disabled MBA exposed direct PPU output");
+
+    cpu.enable_irq = 1;
+    video.compose(bus, cpu, false);
+    require(video.pixels[0] == Video::rgb555_to_argb(0x7fff),
+            "interrupt-serviced MBA did not expose direct PPU output");
 }
 
 static void test_ppu_bit_zero_is_not_a_global_enable() {
@@ -230,6 +348,37 @@ static void test_ppu_bit_zero_is_not_a_global_enable() {
     bus.mmio[0x7042 - kMmioBase] = 0x0001;
     require(video.render_ppu(bus),
             "P_PPU_Enable bit zero incorrectly disabled the GPL16250VA PPU");
+}
+
+static void test_direct_ppu_ignores_stale_framebuffer_pointers() {
+    Bus bus;
+    Cpu cpu(bus);
+    Video video;
+    constexpr uint32_t inherited_framebuffer = 0x3fd400;
+    constexpr uint32_t stale_output = 0x41d400;
+
+    // The resident leaves its frame pointers and last completed frame behind
+    // when a cartridge switches P_PPU_Enable into direct (non-frame-base)
+    // mode. Those stale pointers must not suppress the live page/sprite PPU.
+    bus.mmio[0x7078 - kMmioBase] = uint16_t(inherited_framebuffer);
+    bus.mmio[0x7079 - kMmioBase] = uint16_t(inherited_framebuffer >> 16);
+    bus.mmio[0x707a - kMmioBase] = uint16_t(stale_output);
+    bus.mmio[0x707b - kMmioBase] = uint16_t(stale_output >> 16);
+    bus.mmio[0x707f - kMmioBase] = 0x0000; // bit 7 clear: direct PPU mode
+    bus.last_framebuffer_base = inherited_framebuffer;
+    bus.last_framebuffer_valid = true;
+    bus.dma_write(inherited_framebuffer, 0xf800);
+
+    bus.mmio[0x7042 - kMmioBase] = 0x0003; // sprites enabled, screen coordinates
+    bus.sprite_ram[0] = 1;
+    bus.sprite_ram[1] = 0;
+    bus.sprite_ram[2] = 0;
+    bus.sprite_ram[3] = 0;
+    bus.palette_ram[0] = 0x7fff;
+
+    video.compose(bus, cpu);
+    require(video.pixels[0] == Video::rgb555_to_argb(0x7fff),
+            "stale frame pointers suppressed direct PPU scanout");
 }
 
 static void test_rtc_hms_counters_advance() {
@@ -311,6 +460,31 @@ static void test_timer_deadline_and_lazy_counter_sync() {
             "timer did not overflow on its exact deadline");
     require(bus.read(0x78c4) == 0xfffe,
             "timer did not reload its programmed preload on overflow");
+}
+
+static void test_cpu_dispatches_periodic_events_only_at_the_deadline() {
+    Bus bus;
+    Cpu cpu(bus);
+    bus.mem[0] = 0xf165; // NOP
+    bus.mem[1] = 0xf165;
+    cpu.reset_core(0);
+
+    bus.next_periodic_event_cycles = 100;
+    cpu.step();
+    require(bus.last_periodic_update_cycles == UINT64_MAX,
+            "CPU synchronized periodic devices before their event deadline");
+
+    bus.adc_manual_pending = true;
+    bus.adc_manual_channel = 0;
+    bus.adc_manual_due_cycles = bus.cycles + 1;
+    bus.next_periodic_event_cycles = bus.adc_manual_due_cycles;
+    cpu.step();
+    require(!bus.adc_manual_pending,
+            "CPU did not dispatch a periodic device at its exact deadline");
+    require(bus.last_periodic_update_cycles == bus.cycles,
+            "CPU periodic dispatch used the wrong instruction boundary");
+    require((bus.mmio[0x7961 - kMmioBase] & 0x8080) == 0x8080,
+            "CPU deadline dispatch did not latch ADC completion");
 }
 
 static void test_usb_suspend_deadline_from_cycle_zero() {
@@ -459,12 +633,17 @@ int main() {
     test_touch_frontend_calibration_orientation();
     test_mobigo2_accelerometer_i2c_and_motion_axes();
     test_gpio_d4_power_latch_falling_edge();
+    test_bus_backing_stops_at_external_chip_select();
+    test_unlogged_bus_router_matches_diagnostic_routing();
+    test_cart_aperture_cache_tracks_mcs_and_rom_size();
     test_mba_entry_return_is_an_application_exit();
     test_mba_scanout_requires_inherited_interrupt_service();
     test_ppu_bit_zero_is_not_a_global_enable();
+    test_direct_ppu_ignores_stale_framebuffer_pointers();
     test_rtc_hms_counters_advance();
     test_video_edges_are_cycle_exact();
     test_timer_deadline_and_lazy_counter_sync();
+    test_cpu_dispatches_periodic_events_only_at_the_deadline();
     test_usb_suspend_deadline_from_cycle_zero();
     test_official_fixed_source_dma_completion_path();
     test_dma_loaded_mba_header_registers_entry();

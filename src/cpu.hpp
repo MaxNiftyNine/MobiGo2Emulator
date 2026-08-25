@@ -1006,7 +1006,14 @@ struct Cpu {
         // making every instruction run the complete timer/RTC/video scheduler
         // twice. Keeping the single synchronization inside Cpu::step also
         // ensures tests and alternate frontends cannot accidentally omit it.
-        bus.update_periodic_events(false);
+        // Keep the common instruction path to two loads and a comparison.
+        // update_periodic_events() is intentionally out-of-line because its
+        // uncommon device work is large; calling it before the scheduler's
+        // next deadline only repeats the same guard inside that function.
+        if (bus.next_periodic_event_cycles == 0 ||
+            bus.cycles >= bus.next_periodic_event_cycles) {
+            bus.update_periodic_events(false);
+        }
     }
 };
 

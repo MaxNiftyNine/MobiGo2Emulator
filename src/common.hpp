@@ -37,7 +37,17 @@
 #include <unordered_set>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace mobigo {
+
+inline std::string path_to_utf8(const std::filesystem::path &path);
+inline std::filesystem::path path_from_utf8(std::string_view text);
 
 constexpr uint32_t kAddrMask = 0x3fffff;      // unSP 22-bit word address
 constexpr uint32_t kPpuAddrHighMask = 0x07ff; // PPU FREE mode exposes a 27-bit word address.
@@ -98,9 +108,10 @@ inline std::vector<uint8_t> read_file_bytes(const std::filesystem::path &path) {
     // shipped as two preloaded Emscripten files and joined at startup.
     if (!f && path.filename() == "nand.bin") {
         std::vector<uint8_t> out;
+        const std::string encoded_path = path_to_utf8(path);
         for (const char *suffix : {".part00", ".part01"}) {
-            std::ifstream part(path.string() + suffix, std::ios::binary);
-            if (!part) die("failed to open " + path.string() + suffix);
+            std::ifstream part(encoded_path + suffix, std::ios::binary);
+            if (!part) die("failed to open " + encoded_path + suffix);
             part.seekg(0, std::ios::end);
             const auto size = part.tellg();
             part.seekg(0, std::ios::beg);
@@ -112,7 +123,7 @@ inline std::vector<uint8_t> read_file_bytes(const std::filesystem::path &path) {
         return out;
     }
 #endif
-    if (!f) die("failed to open " + path.string());
+    if (!f) die("failed to open " + path_to_utf8(path));
     f.seekg(0, std::ios::end);
     const auto size = f.tellg();
     f.seekg(0, std::ios::beg);
@@ -121,27 +132,41 @@ inline std::vector<uint8_t> read_file_bytes(const std::filesystem::path &path) {
     return out;
 }
 
+inline void replace_file_atomic(const std::filesystem::path &temporary,
+                                const std::filesystem::path &destination,
+                                std::string_view description) {
+    std::error_code error;
+#ifdef _WIN32
+    if (MoveFileExW(temporary.c_str(), destination.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return;
+    error = std::error_code(static_cast<int>(GetLastError()),
+                            std::system_category());
+#else
+    std::filesystem::rename(temporary, destination, error);
+    if (!error) return;
+#endif
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary, cleanup_error);
+    die("failed to replace " + std::string(description) + " " +
+        path_to_utf8(destination) + ": " + error.message());
+}
+
 inline void write_file_bytes_atomic(const std::filesystem::path &path,
                                     const std::vector<uint8_t> &bytes) {
     std::filesystem::path temporary = path;
     temporary += ".tmp";
     {
         std::ofstream f(temporary, std::ios::binary | std::ios::trunc);
-        if (!f) die("failed to open " + temporary.string());
+        if (!f) die("failed to open " + path_to_utf8(temporary));
         if (!bytes.empty())
             f.write(reinterpret_cast<const char *>(bytes.data()),
                     static_cast<std::streamsize>(bytes.size()));
-        if (!f) die("failed while writing " + temporary.string());
+        if (!f) die("failed while writing " + path_to_utf8(temporary));
     }
     std::error_code ec;
     const auto permissions = std::filesystem::status(path, ec).permissions();
     if (!ec) std::filesystem::permissions(temporary, permissions, ec);
-    ec.clear();
-    std::filesystem::rename(temporary, path, ec);
-    if (ec) {
-        std::filesystem::remove(temporary);
-        die("failed to replace " + path.string() + ": " + ec.message());
-    }
+    replace_file_atomic(temporary, path, "file");
 }
 
 inline uint16_t le16(const std::vector<uint8_t> &v, size_t byte) {
@@ -175,52 +200,24 @@ struct ScriptedKeyTransition {
     std::string name;
 };
 
-enum class EmulatorMode {
-    Accurate,
-    Fast,
-};
-
-enum class MbaTarget {
-    Auto,
-    System,
-    G1,
-    Menu,
-};
-
-inline const char *emulator_mode_name(EmulatorMode mode) {
-    return mode == EmulatorMode::Accurate ? "accurate" : "fast";
-}
-
-inline const char *mba_target_name(MbaTarget target) {
-    switch (target) {
-    case MbaTarget::Auto: return "auto";
-    case MbaTarget::System: return "system";
-    case MbaTarget::G1: return "g1";
-    case MbaTarget::Menu: return "menu";
-    }
-    return "unknown";
-}
-
 inline std::string ascii_lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return char(std::tolower(c)); });
     return value;
 }
 
-inline MbaTarget parse_mba_target(std::string value) {
-    value = ascii_lower(std::move(value));
-    if (value == "auto") return MbaTarget::Auto;
-    if (value == "system" || value == "sy") return MbaTarget::System;
-    if (value == "g1" || value == "game1") return MbaTarget::G1;
-    if (value == "menu" || value == "mm") return MbaTarget::Menu;
-    die("--mba-target expects auto, system/SY, g1/G1, or menu/MM");
+// SDL2main supplies UTF-8 argv and file-drop paths on Windows. Keep persisted
+// and displayed paths UTF-8 on every host instead of relying on the current
+// narrow-string locale.
+inline std::string path_to_utf8(const std::filesystem::path &path) {
+    const std::u8string encoded = path.u8string();
+    return {reinterpret_cast<const char *>(encoded.data()), encoded.size()};
 }
 
-inline EmulatorMode parse_emulator_mode(std::string value) {
-    value = ascii_lower(std::move(value));
-    if (value == "accurate") return EmulatorMode::Accurate;
-    if (value == "fast") return EmulatorMode::Fast;
-    die("--mode expects accurate or fast");
+inline std::filesystem::path path_from_utf8(std::string_view text) {
+    if (text.empty()) return {};
+    const auto *first = reinterpret_cast<const char8_t *>(text.data());
+    return std::filesystem::path(std::u8string(first, first + text.size()));
 }
 
 struct MatrixKey {
@@ -265,7 +262,89 @@ inline std::optional<MatrixKey> matrix_key_from_name(std::string_view name) {
     return std::nullopt;
 }
 
+// The launcher persists these bindings so a player can choose the physical
+// keys that feel natural without changing the emulated MobiGo matrix.
+enum class BindableControl : size_t {
+    Left,
+    Right,
+    Up,
+    Down,
+    Primary,
+    Exit,
+    Help,
+    Power,
+    Brightness,
+    VolumeDown,
+    VolumeUp,
+    MotionLeft,
+    MotionRight,
+    MotionUp,
+    MotionDown,
+    Count,
+};
+
+constexpr size_t kBindableControlCount = size_t(BindableControl::Count);
+
+inline constexpr std::array<std::string_view, kBindableControlCount>
+    kBindableControlNames{{
+        "D-PAD LEFT", "D-PAD RIGHT", "D-PAD UP", "D-PAD DOWN", "PRIMARY",
+        "EXIT", "HELP", "POWER", "BRIGHTNESS", "VOLUME DOWN", "VOLUME UP",
+        "MOTION LEFT", "MOTION RIGHT", "MOTION UP", "MOTION DOWN",
+    }};
+
+inline constexpr std::array<std::string_view, kBindableControlCount>
+    kBindableControlConfigKeys{{
+        "bind_left", "bind_right", "bind_up", "bind_down", "bind_primary",
+        "bind_exit", "bind_help", "bind_power", "bind_brightness",
+        "bind_volume_down", "bind_volume_up", "bind_motion_left",
+        "bind_motion_right", "bind_motion_up", "bind_motion_down",
+    }};
+
+inline constexpr std::array<SDL_Keycode, kBindableControlCount>
+    kDefaultInputBindings{{
+        SDLK_LEFT, SDLK_RIGHT, SDLK_UP, SDLK_DOWN, SDLK_LCTRL, SDLK_ESCAPE,
+        SDLK_F1, SDLK_F2, SDLK_F6, SDLK_F7, SDLK_F8, SDLK_HOME, SDLK_END,
+        SDLK_PAGEUP, SDLK_PAGEDOWN,
+    }};
+
+inline constexpr std::array<MatrixKey, 11> kBindableMatrixKeys{{
+    {3, 3}, {4, 3}, {3, 4}, {4, 4}, {3, 5}, {4, 2},
+    {4, 5}, {3, 2}, {4, 6}, {4, 7}, {4, 8},
+}};
+
+struct InputBindings {
+    std::array<SDL_Keycode, kBindableControlCount> keys =
+        kDefaultInputBindings;
+};
+
+inline bool input_binding_contains(const InputBindings &bindings,
+                                   SDL_Keycode keycode) {
+    return std::find(bindings.keys.begin(), bindings.keys.end(), keycode) !=
+           bindings.keys.end();
+}
+
+inline std::optional<MatrixKey>
+matrix_key_from_sdl(const InputBindings &bindings, SDL_Keycode keycode) {
+    for (size_t index = 0; index < kBindableMatrixKeys.size(); ++index) {
+        if (bindings.keys[index] == keycode)
+            return kBindableMatrixKeys[index];
+    }
+    return std::nullopt;
+}
+
+inline std::optional<unsigned>
+motion_direction_from_sdl(const InputBindings &bindings, SDL_Keycode keycode) {
+    constexpr size_t kMotionFirst = size_t(BindableControl::MotionLeft);
+    for (size_t index = 0; index < 4; ++index) {
+        if (bindings.keys[kMotionFirst + index] == keycode)
+            return unsigned(index);
+    }
+    return std::nullopt;
+}
+
 inline std::optional<MatrixKey> matrix_key_from_sdl(SDL_Keycode keycode) {
+    if (const auto configured = matrix_key_from_sdl(InputBindings{}, keycode))
+        return configured;
     const char *name = nullptr;
     switch (keycode) {
     case SDLK_t: name = "t"; break; case SDLK_y: name = "y"; break;
@@ -282,16 +361,11 @@ inline std::optional<MatrixKey> matrix_key_from_sdl(SDL_Keycode keycode) {
     case SDLK_m: name = "m"; break; case SDLK_BACKSPACE: name = "del"; break;
     case SDLK_CAPSLOCK: name = "caps"; break; case SDLK_z: name = "z"; break;
     case SDLK_x: name = "x"; break; case SDLK_LEFTBRACKET: name = "leftarrow"; break;
-    case SDLK_SPACE: name = "space"; break; case SDLK_F2: name = "off"; break;
-    case SDLK_LEFT: name = "left"; break; case SDLK_UP: name = "up"; break;
-    case SDLK_LCTRL: case SDLK_RCTRL: name = "primary"; break;
+    case SDLK_SPACE: name = "space"; break; case SDLK_RCTRL: name = "primary"; break;
     case SDLK_q: name = "q"; break; case SDLK_NUMLOCKCLEAR: name = "num"; break;
     case SDLK_RIGHTBRACKET: name = "rightarrow"; break;
     case SDLK_RETURN: case SDLK_KP_ENTER: name = "enter"; break;
-    case SDLK_ESCAPE: name = "exit"; break; case SDLK_RIGHT: name = "right"; break;
-    case SDLK_DOWN: name = "down"; break; case SDLK_F1: name = "help"; break;
-    case SDLK_F6: name = "brightness"; break; case SDLK_F7: name = "voldown"; break;
-    case SDLK_F8: name = "volup"; break; case SDLK_SLASH: name = "question"; break;
+    case SDLK_SLASH: name = "question"; break;
     default: return std::nullopt;
     }
     return matrix_key_from_name(name);
@@ -302,9 +376,6 @@ struct Options {
     std::filesystem::path cart;
     std::filesystem::path spi = "spi.bin";
     std::filesystem::path nand = "nand.bin";
-    std::filesystem::path mba;
-    MbaTarget mba_target = MbaTarget::Auto;
-    EmulatorMode mode = EmulatorMode::Accurate;
     std::filesystem::path dump_frame;
     std::filesystem::path dump_current_frame;
     std::filesystem::path dump_frame_dir;
@@ -317,8 +388,8 @@ struct Options {
     uint64_t max_steps = 0;
     uint64_t render_interval = kDefaultRenderInterval;
     uint32_t max_present_hz = 60;
+    uint32_t speed_percent = 100;
     uint64_t open_window_at = 0;
-    bool open_window_on_mba = false;
     uint64_t start_logging_at = 0;
     uint64_t dump_frame_interval = 0;
     uint64_t trace_limit = 0;
@@ -330,7 +401,6 @@ struct Options {
     uint32_t trace_hi = 0;
     uint32_t rom_base = 0x008000;
     uint32_t start_pc = 0;
-    std::string boot = "rom";
     std::string rom_endian = "le";
     bool trace = false;
     bool trace_transitions = false;
@@ -356,7 +426,13 @@ struct Options {
     bool realtime_cap = true;
     bool realtime_cap_explicit = false;
     bool audio = false;
-    bool usb = false;
+    bool show_speed = true;
+    InputBindings input_bindings;
+    // Desktop-frontend presentation choices. These are deliberately not CLI
+    // switches, so legacy invocations retain exactly their existing defaults.
+    int window_scale = 2;
+    bool fullscreen = false;
+    bool integer_scaling = false;
     std::filesystem::path log_path = "emulator.log";
 };
 
@@ -373,15 +449,13 @@ inline Options parse_args(int argc, char **argv) {
             if (i + 1 >= argc) die(std::string("missing value for ") + name);
             return argv[++i];
         };
-        if (a == "--rom") opt.rom = need("--rom");
-        else if (a == "--cart") opt.cart = need("--cart");
-        else if (a == "--spi") opt.spi = need("--spi");
-        else if (a == "--nand") opt.nand = need("--nand");
-        else if (a == "--mba") opt.mba = need("--mba");
-        else if (a == "--mba-target" || a == "--mba-slot")
-            opt.mba_target = parse_mba_target(need(a.c_str()));
-        else if (a == "--mode") opt.mode = parse_emulator_mode(need("--mode"));
-        else if (a == "--boot") opt.boot = need("--boot");
+        auto need_path = [&](const char *name) -> std::filesystem::path {
+            return path_from_utf8(need(name));
+        };
+        if (a == "--rom") opt.rom = need_path("--rom");
+        else if (a == "--cart") opt.cart = need_path("--cart");
+        else if (a == "--spi") opt.spi = need_path("--spi");
+        else if (a == "--nand") opt.nand = need_path("--nand");
         else if (a == "--rom-base") opt.rom_base = uint32_t(std::stoul(need("--rom-base"), nullptr, 0));
         else if (a == "--rom-endian") opt.rom_endian = need("--rom-endian");
         else if (a == "--start-pc") {
@@ -392,12 +466,13 @@ inline Options parse_args(int argc, char **argv) {
         else if (a == "--render-interval") opt.render_interval = std::stoull(need("--render-interval"));
         else if (a == "--max-present-hz") opt.max_present_hz = uint32_t(
             std::stoul(need("--max-present-hz")));
+        else if (a == "--speed-percent") opt.speed_percent = uint32_t(
+            std::stoul(need("--speed-percent")));
         else if (a == "--open-window-at") opt.open_window_at = std::stoull(need("--open-window-at"));
-        else if (a == "--open-window-on-mba") opt.open_window_on_mba = true;
         else if (a == "--start-logging-at") opt.start_logging_at = std::stoull(need("--start-logging-at"));
-        else if (a == "--dump-frame") opt.dump_frame = need("--dump-frame");
-        else if (a == "--dump-current-frame") opt.dump_current_frame = need("--dump-current-frame");
-        else if (a == "--dump-frame-dir") opt.dump_frame_dir = need("--dump-frame-dir");
+        else if (a == "--dump-frame") opt.dump_frame = need_path("--dump-frame");
+        else if (a == "--dump-current-frame") opt.dump_current_frame = need_path("--dump-current-frame");
+        else if (a == "--dump-frame-dir") opt.dump_frame_dir = need_path("--dump-frame-dir");
         else if (a == "--dump-frame-interval") opt.dump_frame_interval = std::stoull(need("--dump-frame-interval"));
         else if (a == "--touch-event") {
             const std::string value = need("--touch-event");
@@ -448,8 +523,8 @@ inline Options parse_args(int argc, char **argv) {
             opt.scripted_key_transitions.push_back(
                 {at + duration, matrix_key->row, matrix_key->column, false, key});
         }
-        else if (a == "--dump-memory") opt.dump_memory = need("--dump-memory");
-        else if (a == "--dump-code") opt.dump_code = need("--dump-code");
+        else if (a == "--dump-memory") opt.dump_memory = need_path("--dump-memory");
+        else if (a == "--dump-code") opt.dump_code = need_path("--dump-code");
         else if (a == "--dump-memory-base") {
             opt.dump_memory_base = uint32_t(std::stoul(need("--dump-memory-base"), nullptr, 0));
         }
@@ -480,7 +555,7 @@ inline Options parse_args(int argc, char **argv) {
         }
         else if (a == "--dump-memory-dma") opt.dump_memory_dma = true;
         else if (a == "--log") opt.log = true;
-        else if (a == "--log-file") { opt.log = true; opt.log_path = need("--log-file"); }
+        else if (a == "--log-file") { opt.log = true; opt.log_path = need_path("--log-file"); }
         else if (a == "--vsync") opt.vsync = true;
         else if (a == "--no-window") opt.window = false;
         else if (a == "--no-cap") {
@@ -492,7 +567,8 @@ inline Options parse_args(int argc, char **argv) {
             opt.realtime_cap_explicit = true;
         }
         else if (a == "--audio") opt.audio = true;
-        else if (a == "--usb") opt.usb = true;
+        else if (a == "--show-speed") opt.show_speed = true;
+        else if (a == "--hide-speed") opt.show_speed = false;
         else if (a == "--rom-fetch-mirror64") opt.rom_fetch_mirror64 = true;
         else if (a == "--rom-shadow-low") opt.rom_shadow_low = true;
         else if (a == "--no-rom-shadow-low") opt.rom_shadow_low = false;
@@ -515,28 +591,76 @@ inline Options parse_args(int argc, char **argv) {
         else if (a == "--battery-adc") opt.battery_adc = uint16_t(
             std::stoul(need("--battery-adc"), nullptr, 0) & 0x0fff);
         else if (a == "--help" || a == "-h") {
-            std::cout << "usage: mobigo2_emu ... [--nand path] [--mba path] "
-                         "[--mba-target auto|system|g1|menu] "
-                         "[--mode accurate|fast] [--open-window-on-mba] "
-                         "[--touch-event at,duration,x,y] "
-                         "[--key-event at,duration,key] [--usb] [--audio] "
-                         "[--render-interval N] [--max-present-hz N] "
-                         "[--no-window] [--no-cap|--cap] [--auto-power-wake] "
-                         "[--open-window-at N] [--start-logging-at N] [--log] "
-                         "[--log-file path] ...\n";
+            std::cout << R"(usage: mobigo2_emu [options]
+
+With no options, open the desktop launcher. Passing any option uses the
+stable command-line interface.
+
+Images:
+  --rom PATH                 Internal ROM image
+  --spi PATH                 SPI flash image
+  --nand PATH                NAND image
+  --cart PATH                Cartridge image
+  --rom-base ADDRESS         Internal ROM word address
+  --rom-endian le|be         Internal ROM byte order
+  --start-pc ADDRESS         Override reset program counter
+
+Execution and presentation:
+  --speed-percent N          Run windowed emulation at 25..400% of hardware speed
+  --steps N                  Stop after N instructions
+  --render-interval N        Instructions between renderer updates
+  --max-present-hz N         Host presentation rate (0 uses automatic 120 Hz)
+  --open-window-at N         Defer the window until instruction N
+  --no-window                Run headlessly
+  --cap / --no-cap           Enable or disable real-time host pacing
+  --vsync                    Synchronize window presentation
+  --audio                    Enable host audio output
+  --show-speed / --hide-speed Show or hide the live speed in the window title
+
+Scripted input and output:
+  --touch-event A,D,X,Y      Touch at instruction A for duration D (repeatable)
+  --key-event A,D,KEY        Matrix key event (repeatable)
+  --dump-frame PATH          Write the final composed framebuffer
+  --dump-current-frame PATH  Write the current displayed framebuffer
+  --dump-frame-dir PATH      Write a numbered framebuffer sequence
+  --dump-frame-interval N    Instructions between sequence frames
+  --dump-memory PATH         Write a final memory range
+  --dump-memory-base ADDRESS First word address to dump
+  --dump-memory-words N      Number of words to dump
+  --dump-memory-dma          Read the dump through DMA-visible mapping
+  --dump-code PATH           Write a final code range
+  --dump-code-base ADDRESS   First code word address to dump
+  --dump-code-words N        Number of code words to dump
+
+Diagnostics:
+  --log                      Enable the diagnostic log
+  --log-file PATH            Enable logging to PATH
+  --start-logging-at N       Defer logging until instruction N
+  --trace                    Enable instruction tracing and logging
+  --trace-pc LO HI           Trace only an inclusive PC range
+  --trace-limit N            Limit instruction trace records
+  --trace-start-insn N       Defer instruction tracing until N
+  --trace-transitions        Log control-flow transitions
+  --trace-transition-limit N Limit transition records
+
+Hardware research options:
+  --rom-shadow-low / --no-rom-shadow-low
+  --rom-fetch-mirror64 / --no-rom-fetch-mirror64
+  --allow-invalid-alu-nop
+  --auto-power-wake / --no-auto-power-wake
+  --efuse0 N  --efuse1 N  --efuse2 N
+  --gpio-a N  --gpio-b N  --gpio-c N  --gpio-d N  --gpio-e N
+  --battery-adc N
+
+  -h, --help                 Show this help
+)";
             std::exit(0);
         } else {
             die("unknown argument: " + a);
         }
     }
-    if (opt.open_window_on_mba && opt.mba.empty())
-        die("--open-window-on-mba requires --mba");
-    if (opt.mba.empty() && opt.mba_target != MbaTarget::Auto)
-        die("--mba-target/--mba-slot requires --mba");
-    if (opt.open_window_on_mba && opt.open_window_at != 0)
-        die("--open-window-on-mba and --open-window-at are mutually exclusive");
-    if (opt.mode == EmulatorMode::Fast && !opt.realtime_cap_explicit)
-        opt.realtime_cap = false;
+    if (opt.speed_percent < 25 || opt.speed_percent > 400)
+        die("--speed-percent must be between 25 and 400");
     std::sort(opt.scripted_touches.begin(), opt.scripted_touches.end(),
               [](const ScriptedTouch &a, const ScriptedTouch &b) { return a.at < b.at; });
     for (size_t i = 1; i < opt.scripted_touches.size(); ++i) {
@@ -555,10 +679,11 @@ inline Options parse_args(int argc, char **argv) {
 
 inline std::filesystem::path executable_directory(const char *argv0) {
     std::error_code error;
-    std::filesystem::path candidate = std::filesystem::absolute(argv0, error);
-    if (error) candidate = argv0;
+    const std::filesystem::path supplied = path_from_utf8(argv0);
+    std::filesystem::path candidate = std::filesystem::absolute(supplied, error);
+    if (error) candidate = supplied;
     candidate = std::filesystem::weakly_canonical(candidate, error);
-    return (error ? std::filesystem::path(argv0) : candidate).parent_path();
+    return (error ? supplied : candidate).parent_path();
 }
 
 inline void resolve_packaged_firmware(Options &opt, const char *argv0) {

@@ -1,9 +1,11 @@
 /build/
+/build-*/
 /dist/
 /firmware/nand.bin
 /firmware/nand.us-stitched.bin
 *.log
 *.profraw
 *.profdata
+__pycache__/
+*.pyc
 .DS_Store
-

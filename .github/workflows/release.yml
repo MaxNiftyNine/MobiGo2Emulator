@@ -3,68 +3,122 @@ name: Package release
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   macos:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      # Match the oldest runner used here. The bundled Homebrew SDL library
+      # may have a newer minimum than an executable compiled against its SDK.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
     steps:
       - uses: actions/checkout@v4
-      - run: brew install cmake ninja sdl2 pkg-config
+      - run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - run: brew install cmake ninja sdl2 sdl2_ttf dylibbundler pkg-config
       - run: python3 scripts/assemble_firmware.py
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - run: cmake --build build --parallel && ctest --test-dir build --output-on-failure
+      - name: Build profile-guided release binary
+        run: ./pgo_build.sh
       - name: Build app bundle
         run: |
           APP=dist/MobiGo2Emulator.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/firmware"
-          cp build/mobigo2_emu "$APP/Contents/MacOS/MobiGo2Emulator"
+          cp build/pgo/mobigo2_emu "$APP/Contents/MacOS/MobiGo2Emulator"
           cp packaging/Info.plist "$APP/Contents/Info.plist"
           cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin "$APP/Contents/Resources/firmware/"
-          SDL="$(otool -L build/mobigo2_emu | awk '/libSDL2/{print $1; exit}')"
-          cp "$SDL" "$APP/Contents/Frameworks/"
-          install_name_tool -change "$SDL" '@executable_path/../Frameworks/libSDL2-2.0.0.dylib' "$APP/Contents/MacOS/MobiGo2Emulator"
+          SDL="$(otool -L build/pgo/mobigo2_emu | awk '/libSDL2/{print $1; exit}')"
+          SDL_NAME="$(basename "$SDL")"
+          cp -L "$SDL" "$APP/Contents/Frameworks/$SDL_NAME"
+          install_name_tool -change "$SDL" "@executable_path/../Frameworks/$SDL_NAME" "$APP/Contents/MacOS/MobiGo2Emulator"
+          # Homebrew's SDL2 compatibility library loads SDL3 at runtime, so it
+          # does not appear in the executable's otool dependency list.
+          SDL3="$(brew --prefix sdl3)/lib/libSDL3.dylib"
+          cp -L "$SDL3" "$APP/Contents/Frameworks/libSDL3.dylib"
+          # Bundle SDL_ttf and its FreeType/Harfbuzz dependency closure for
+          # system-font rendering in the launcher.
+          dylibbundler -od -b -x "$APP/Contents/MacOS/MobiGo2Emulator" \
+            -d "$APP/Contents/Frameworks"
           codesign --force --deep --sign - "$APP"
+          for binary in \
+            "$APP/Contents/MacOS/MobiGo2Emulator" \
+            "$APP/Contents/Frameworks/$SDL_NAME" \
+            "$APP/Contents/Frameworks/libSDL3.dylib"
+          do
+            minos="$(xcrun vtool -show-build "$binary" | awk '/minos/{print $2; exit}')"
+            echo "$binary minimum macOS: $minos"
+            awk -v version="$minos" 'BEGIN { exit !(version + 0 <= 15.0) }'
+          done
+          DYLD_PRINT_LIBRARIES=1 "$APP/Contents/MacOS/MobiGo2Emulator" \
+            --rom "$APP/Contents/Resources/firmware/internalrom.bin" \
+            --spi "$APP/Contents/Resources/firmware/spi.bin" \
+            --nand "$APP/Contents/Resources/firmware/nand.bin" \
+            --no-cap --no-window --steps 1 2>dyld-libraries.txt
+          grep 'Contents/Frameworks/.*libSDL2' dyld-libraries.txt
+          grep 'Contents/Frameworks/libSDL3.dylib' dyld-libraries.txt
           cp README.md LICENSE dist/
-          ditto -c -k --sequesterRsrc --keepParent "$APP" MobiGo2Emulator-macOS.zip
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "MobiGo2Emulator-macOS-${{ matrix.architecture }}.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: MobiGo2Emulator-macOS
-          path: MobiGo2Emulator-macOS.zip
+          name: MobiGo2Emulator-macOS-${{ matrix.architecture }}
+          path: MobiGo2Emulator-macOS-${{ matrix.architecture }}.zip
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: MobiGo2Emulator-macOS.zip
+          files: MobiGo2Emulator-macOS-${{ matrix.architecture }}.zip
 
   linux:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: x86_64
+            uname_architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+            uname_architecture: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libsdl2-dev patchelf
+      - run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libsdl2-dev libsdl2-ttf-dev patchelf clang llvm
       - run: python3 scripts/assemble_firmware.py
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - run: cmake --build build --parallel && ctest --test-dir build --output-on-failure
+      - name: Build profile-guided release binary
+        run: CXX=clang++ ./pgo_build.sh
       - name: Build portable folder
         run: |
+          test "$(uname -m)" = "${{ matrix.uname_architecture }}"
           ROOT=dist/MobiGo2Emulator
           mkdir -p "$ROOT/lib" "$ROOT/firmware"
-          cp build/mobigo2_emu "$ROOT/MobiGo2Emulator"
+          cp build/pgo/mobigo2_emu "$ROOT/MobiGo2Emulator"
           cp "$(ldconfig -p | awk '/libSDL2-2.0.so.0/{print $NF; exit}')" "$ROOT/lib/"
+          cp "$(ldconfig -p | awk '/libSDL2_ttf-2.0.so.0/{print $NF; exit}')" "$ROOT/lib/"
           patchelf --set-rpath '$ORIGIN/lib' "$ROOT/MobiGo2Emulator"
           cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin "$ROOT/firmware/"
           cp README.md LICENSE "$ROOT/"
-          tar -czf MobiGo2Emulator-Linux-x86_64.tar.gz -C dist MobiGo2Emulator
+          tar -czf MobiGo2Emulator-Ubuntu24.04-${{ matrix.architecture }}.tar.gz -C dist MobiGo2Emulator
       - uses: actions/upload-artifact@v4
         with:
-          name: MobiGo2Emulator-Linux-x86_64
-          path: MobiGo2Emulator-Linux-x86_64.tar.gz
+          name: MobiGo2Emulator-Ubuntu24.04-${{ matrix.architecture }}
+          path: MobiGo2Emulator-Ubuntu24.04-${{ matrix.architecture }}.tar.gz
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: MobiGo2Emulator-Linux-x86_64.tar.gz
+          files: MobiGo2Emulator-Ubuntu24.04-${{ matrix.architecture }}.tar.gz
 
   windows:
     runs-on: windows-latest
@@ -77,8 +131,12 @@ jobs:
           install: >-
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-compiler-rt
+            mingw-w64-x86_64-llvm
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
             mingw-w64-x86_64-python
       - shell: msys2 {0}
         run: |
@@ -86,11 +144,29 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build build --parallel
           ctest --test-dir build --output-on-failure
+          CXX=clang++ MOBIGO_CMAKE_GENERATOR=Ninja ./pgo_build.sh
           mkdir -p dist/MobiGo2Emulator/firmware
-          cp build/mobigo2_emu.exe dist/MobiGo2Emulator/MobiGo2Emulator.exe
-          cp /mingw64/bin/SDL2.dll /mingw64/bin/libgcc_s_seh-1.dll /mingw64/bin/libstdc++-6.dll /mingw64/bin/libwinpthread-1.dll dist/MobiGo2Emulator/
+          cp build/pgo/mobigo2_emu.exe dist/MobiGo2Emulator/MobiGo2Emulator.exe
+          dependencies=$(mktemp)
+          ldd build/pgo/mobigo2_emu.exe | tee "$dependencies"
+          if grep -qi 'not found' "$dependencies"; then
+            echo 'Unresolved Windows runtime dependency' >&2
+            exit 1
+          fi
+          awk '$2 == "=>" && $3 ~ /^\/mingw64\/bin\// { print $3 }' "$dependencies" | sort -u |
+          while IFS= read -r dll; do
+            cp "$dll" dist/MobiGo2Emulator/
+          done
           cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin dist/MobiGo2Emulator/firmware/
           cp README.md LICENSE dist/MobiGo2Emulator/
+      - name: Smoke-test packaged executable without MSYS2 on PATH
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          Push-Location dist/MobiGo2Emulator
+          & .\MobiGo2Emulator.exe --no-cap --no-window --steps 1
+          if ($LASTEXITCODE -ne 0) { throw "Packaged emulator failed: $LASTEXITCODE" }
+          Pop-Location
       - shell: pwsh
         run: Compress-Archive -Path dist/MobiGo2Emulator -DestinationPath MobiGo2Emulator-Windows-x86_64.zip
       - uses: actions/upload-artifact@v4

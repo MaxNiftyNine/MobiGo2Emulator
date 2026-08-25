@@ -641,7 +641,6 @@ struct Video {
         const uint32_t fbo = fbo_raw;
         const bool plausible_fbi = fbi_raw != 0 && !(fbi_raw >= kMmioBase && fbi_raw <= kMmioEnd);
         const bool plausible_fbo = fbo_raw != 0 && !(fbo_raw >= kMmioBase && fbo_raw <= kMmioEnd);
-        const bool ppu_rendered = !frame_base_mode && !plausible_fbo && render_ppu(bus);
         const uint32_t latched_fbi = (allow_latched_frame && bus.last_framebuffer_valid)
             ? bus.last_framebuffer_base : 0;
         // The retail loader hands an MBA a live system display. On hardware,
@@ -657,7 +656,12 @@ struct Video {
             }
             return;
         }
-        if (frame_base_mode && plausible_fbi) {
+        const bool ppu_rendered = !frame_base_mode && render_ppu(bus);
+        if (!frame_base_mode && ppu_rendered) {
+            // The direct PPU renderer already populated pixels. Frame-base
+            // pointers inherited from resident firmware are inactive in this
+            // mode and must not replace the live PPU scanout.
+        } else if (frame_base_mode && plausible_fbi) {
             pixels.resize(W * H);
             for (uint32_t i = 0; i < W * H; ++i) {
                 const uint16_t v = bus.dma_read(fbi + i);

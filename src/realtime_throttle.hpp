@@ -16,19 +16,19 @@ struct RealtimeThrottle {
     Clock::time_point wall_origin = Clock::now();
     uint64_t emulated_nanoseconds = 0;
     uint64_t fractional_numerator = 0;
-    uint64_t fractional_clock_hz = 1;
+    uint64_t fractional_denominator = 1;
+    uint32_t speed_percent = 100;
 
     explicit RealtimeThrottle(bool should_enable)
         : enabled(should_enable) {}
 
-    // Start a new host-time epoch. Deferred presentation uses this at the
-    // exact MBA handoff so the uncapped boot is never counted as time that the
-    // foreground application must sleep or catch up against.
+    // Start a new host-time epoch. Deferred presentation uses this so time
+    // before the window opens is never counted toward host pacing.
     void rebase() {
         wall_origin = Clock::now();
         emulated_nanoseconds = 0;
         fractional_numerator = 0;
-        fractional_clock_hz = 1;
+        fractional_denominator = 1;
     }
 
     void set_enabled(bool should_enable) {
@@ -36,20 +36,26 @@ struct RealtimeThrottle {
         rebase();
     }
 
+    void set_speed_percent(uint32_t value) {
+        speed_percent = std::clamp(value, 25u, 400u);
+        rebase();
+    }
+
     void advance_cycles(uint64_t cycles, uint64_t clock_hz) {
         if (!enabled || cycles == 0) return;
         clock_hz = std::max<uint64_t>(1, clock_hz);
-        if (fractional_clock_hz != clock_hz) {
+        const uint64_t denominator = clock_hz * speed_percent;
+        if (fractional_denominator != denominator) {
             fractional_numerator = uint64_t(
-                (static_cast<unsigned __int128>(fractional_numerator) * clock_hz) /
-                fractional_clock_hz);
-            fractional_clock_hz = clock_hz;
+                (static_cast<unsigned __int128>(fractional_numerator) * denominator) /
+                fractional_denominator);
+            fractional_denominator = denominator;
         }
         const unsigned __int128 total =
-            static_cast<unsigned __int128>(cycles) * 1000000000ull +
+            static_cast<unsigned __int128>(cycles) * 1000000000ull * 100 +
             fractional_numerator;
-        emulated_nanoseconds += uint64_t(total / clock_hz);
-        fractional_numerator = uint64_t(total % clock_hz);
+        emulated_nanoseconds += uint64_t(total / denominator);
+        fractional_numerator = uint64_t(total % denominator);
     }
 
     void wait_until_current() {

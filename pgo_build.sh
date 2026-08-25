@@ -9,6 +9,36 @@ PROFILE_DIR="$REPO_DIR/build/pgo-data"
 RAW_PROFILE="$PROFILE_DIR/mobigo2.profraw"
 MERGED_PROFILE="$PROFILE_DIR/mobigo2.profdata"
 TRAIN_STEPS=${TRAIN_STEPS:-100000000}
+CMAKE_GENERATOR_NAME=${MOBIGO_CMAKE_GENERATOR:-}
+
+if [ -z "$CMAKE_GENERATOR_NAME" ] && command -v ninja >/dev/null 2>&1; then
+    CMAKE_GENERATOR_NAME=Ninja
+fi
+
+run_cmake() {
+    if [ -n "$CMAKE_GENERATOR_NAME" ]; then
+        cmake -G "$CMAKE_GENERATOR_NAME" "$@"
+    else
+        cmake "$@"
+    fi
+}
+
+find_emulator() {
+    directory=$1
+    for candidate in \
+        "$directory/mobigo2_emu" \
+        "$directory/mobigo2_emu.exe" \
+        "$directory/Release/mobigo2_emu" \
+        "$directory/Release/mobigo2_emu.exe"
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    echo "CMake did not produce a runnable emulator under $directory" >&2
+    return 1
+}
 
 find_pkg_config() {
     if [ -n "${MOBIGO_PKG_CONFIG:-}" ] && [ -x "$MOBIGO_PKG_CONFIG" ]; then
@@ -51,23 +81,37 @@ for firmware in internalrom.bin spi.bin nand.bin; do
 done
 
 mkdir -p "$PROFILE_DIR"
-cmake -S "$SCRIPT_DIR" -B "$GENERATE_DIR" \
+rm -f "$RAW_PROFILE" "$MERGED_PROFILE"
+# PGO results are compiler- and generator-specific. Reconfigure both stages
+# from clean generated directories so a previous local toolchain cannot leak
+# into a new release build.
+cmake -E remove_directory "$GENERATE_DIR"
+cmake -E remove_directory "$FINAL_DIR"
+run_cmake -S "$SCRIPT_DIR" -B "$GENERATE_DIR" \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     -DMOBIGO2_PGO_GENERATE=ON \
+    -DMOBIGO2_PGO_PROFILE= \
     -DPKG_CONFIG_EXECUTABLE="$PKG_CONFIG_BIN"
 cmake --build "$GENERATE_DIR" --config Release --parallel
 
-LLVM_PROFILE_FILE="$RAW_PROFILE" "$GENERATE_DIR/mobigo2_emu" \
-    --mode fast --no-window --steps "$TRAIN_STEPS" \
+TRAINING_EMULATOR=$(find_emulator "$GENERATE_DIR")
+LLVM_PROFILE_FILE="$RAW_PROFILE" "$TRAINING_EMULATOR" \
+    --no-cap --no-window --steps "$TRAIN_STEPS" \
     --rom "$REPO_DIR/firmware/internalrom.bin" \
     --spi "$REPO_DIR/firmware/spi.bin" \
     --nand "$REPO_DIR/firmware/nand.bin"
+[ -s "$RAW_PROFILE" ] || {
+    echo "Instrumented run did not produce $RAW_PROFILE" >&2
+    exit 1
+}
 "$LLVM_PROFDATA" merge -output="$MERGED_PROFILE" "$RAW_PROFILE"
 
-cmake -S "$SCRIPT_DIR" -B "$FINAL_DIR" \
+run_cmake -S "$SCRIPT_DIR" -B "$FINAL_DIR" \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+    -DMOBIGO2_PGO_GENERATE=OFF \
     -DMOBIGO2_PGO_PROFILE="$MERGED_PROFILE" \
     -DPKG_CONFIG_EXECUTABLE="$PKG_CONFIG_BIN"
 cmake --build "$FINAL_DIR" --config Release --parallel
 
-echo "PGO emulator: $FINAL_DIR/mobigo2_emu"
+FINAL_EMULATOR=$(find_emulator "$FINAL_DIR")
+echo "PGO emulator: $FINAL_EMULATOR"

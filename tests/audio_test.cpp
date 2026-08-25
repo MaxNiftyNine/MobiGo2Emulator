@@ -128,9 +128,21 @@ static void test_spu_restart_between_audio_pumps() {
     bus.write(0x7c00, uint16_t(second_wave));
     bus.write(0x7c01, 0x1000);
     bus.write(0x7b80, 0x0001);
+    const uint64_t same_cycle = bus.cycles;
+    const size_t output_before = audio.output.size();
     audio.pump(bus);
+    assert(bus.cycles == same_cycle);
+    assert(audio.output.size() == output_before);
     assert(audio.channels[0].playing);
     assert(audio.channels[0].wave_addr == second_wave);
+
+    // Disabling a voice is equally immediate and clears the live status even
+    // when the emulated clock has not advanced to another host sample.
+    bus.write(0x7b80, 0x0000);
+    audio.pump(bus);
+    assert(!audio.channels[0].playing);
+    assert((audio.active_channels & 1) == 0);
+    assert((bus.mmio[0x7b8f - kMmioBase] & 1) == 0);
 }
 
 static void test_mobigo_output_gate() {

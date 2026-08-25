@@ -29,6 +29,10 @@ if(EMSCRIPTEN)
   set(SDL2_LIBRARY_DIRS "")
   set(SDL2_LIBRARIES "")
   set(SDL2_CFLAGS_OTHER "")
+  set(SDL2_TTF_INCLUDE_DIRS "")
+  set(SDL2_TTF_LIBRARY_DIRS "")
+  set(SDL2_TTF_LIBRARIES "")
+  set(SDL2_TTF_CFLAGS_OTHER "")
 else()
   find_package(SDL2 CONFIG QUIET)
   if(TARGET SDL2::SDL2)
@@ -43,6 +47,8 @@ else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED sdl2)
   endif()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(SDL2_TTF REQUIRED SDL2_ttf)
 endif()
 
 if(MSVC)
@@ -59,21 +65,26 @@ add_executable(mobigo2_emu
   src/bus.hpp
   src/common.hpp
   src/cpu.hpp
+  src/desktop_frontend.cpp
+  src/desktop_frontend.hpp
+  src/desktop_frontend_model.cpp
   src/devices.hpp
-  src/mba_overlay.hpp
+  src/game_controller.hpp
   src/realtime_throttle.hpp
-  src/usb_panel.hpp
+  src/ui_font.hpp
   src/video.hpp
 )
 if(WIN32)
+  target_link_libraries(mobigo2_emu PRIVATE comdlg32)
   # Match the distributed Windows launcher: SDL owns WinMain and launching the
   # emulator does not create a second console window.
   set_property(TARGET mobigo2_emu PROPERTY WIN32_EXECUTABLE TRUE)
 endif()
 target_include_directories(mobigo2_emu PRIVATE ${SDL2_INCLUDE_DIRS})
-target_link_directories(mobigo2_emu PRIVATE ${SDL2_LIBRARY_DIRS})
-target_link_libraries(mobigo2_emu PRIVATE ${MOBIGO2_SDL_MAIN_TARGET} ${SDL2_LIBRARIES})
-target_compile_options(mobigo2_emu PRIVATE ${SDL2_CFLAGS_OTHER} ${MOBIGO2_WARNING_FLAGS})
+target_include_directories(mobigo2_emu PRIVATE ${SDL2_TTF_INCLUDE_DIRS})
+target_link_directories(mobigo2_emu PRIVATE ${SDL2_LIBRARY_DIRS} ${SDL2_TTF_LIBRARY_DIRS})
+target_link_libraries(mobigo2_emu PRIVATE ${MOBIGO2_SDL_MAIN_TARGET} ${SDL2_LIBRARIES} ${SDL2_TTF_LIBRARIES})
+target_compile_options(mobigo2_emu PRIVATE ${SDL2_CFLAGS_OTHER} ${SDL2_TTF_CFLAGS_OTHER} ${MOBIGO2_WARNING_FLAGS})
 if(MOBIGO2_PGO_GENERATE)
   target_compile_options(mobigo2_emu PRIVATE -fprofile-instr-generate)
   target_link_options(mobigo2_emu PRIVATE -fprofile-instr-generate)
@@ -85,9 +96,10 @@ elseif(MOBIGO2_PGO_PROFILE)
   target_link_options(mobigo2_emu PRIVATE -fprofile-instr-use=${MOBIGO2_PGO_PROFILE})
 endif()
 if(EMSCRIPTEN)
-  target_compile_options(mobigo2_emu PRIVATE -sUSE_SDL=2)
+  target_compile_options(mobigo2_emu PRIVATE -sUSE_SDL=2 -sUSE_SDL_TTF=2)
   target_link_options(mobigo2_emu PRIVATE
     -sUSE_SDL=2
+    -sUSE_SDL_TTF=2
     -sALLOW_MEMORY_GROWTH=1
     -sINITIAL_MEMORY=134217728
     -sASSERTIONS=1
@@ -116,13 +128,18 @@ if(BUILD_TESTING)
     list(REMOVE_ITEM MOBIGO2_SDL_TEST_LIBRARIES SDL2main mingw32)
     list(REMOVE_ITEM MOBIGO2_SDL_TEST_CFLAGS "-Dmain=SDL_main")
   endif()
+  if(MSVC)
+    set(MOBIGO2_TEST_ASSERT_FLAGS /UNDEBUG)
+  else()
+    set(MOBIGO2_TEST_ASSERT_FLAGS -UNDEBUG)
+  endif()
 
   add_executable(audio_test tests/audio_test.cpp)
   target_compile_definitions(audio_test PRIVATE SDL_MAIN_HANDLED)
   target_include_directories(audio_test PRIVATE src ${SDL2_INCLUDE_DIRS})
   target_link_directories(audio_test PRIVATE ${SDL2_LIBRARY_DIRS})
   target_link_libraries(audio_test PRIVATE ${MOBIGO2_SDL_TEST_LIBRARIES})
-  target_compile_options(audio_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS})
+  target_compile_options(audio_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS} ${MOBIGO2_TEST_ASSERT_FLAGS})
   add_test(NAME audio_test COMMAND audio_test)
 
   add_executable(watchdog_test tests/watchdog_test.cpp)
@@ -130,7 +147,7 @@ if(BUILD_TESTING)
   target_include_directories(watchdog_test PRIVATE src ${SDL2_INCLUDE_DIRS})
   target_link_directories(watchdog_test PRIVATE ${SDL2_LIBRARY_DIRS})
   target_link_libraries(watchdog_test PRIVATE ${MOBIGO2_SDL_TEST_LIBRARIES})
-  target_compile_options(watchdog_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS})
+  target_compile_options(watchdog_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS} ${MOBIGO2_TEST_ASSERT_FLAGS})
   add_test(NAME watchdog_test COMMAND watchdog_test)
 
   add_executable(hardware_accuracy_test tests/hardware_accuracy_test.cpp)
@@ -138,7 +155,7 @@ if(BUILD_TESTING)
   target_include_directories(hardware_accuracy_test PRIVATE src ${SDL2_INCLUDE_DIRS})
   target_link_directories(hardware_accuracy_test PRIVATE ${SDL2_LIBRARY_DIRS})
   target_link_libraries(hardware_accuracy_test PRIVATE ${MOBIGO2_SDL_TEST_LIBRARIES})
-  target_compile_options(hardware_accuracy_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS})
+  target_compile_options(hardware_accuracy_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS} ${MOBIGO2_TEST_ASSERT_FLAGS})
   add_test(NAME hardware_accuracy_test COMMAND hardware_accuracy_test)
 
   add_executable(configuration_test tests/configuration_test.cpp)
@@ -146,6 +163,24 @@ if(BUILD_TESTING)
   target_include_directories(configuration_test PRIVATE src ${SDL2_INCLUDE_DIRS})
   target_link_directories(configuration_test PRIVATE ${SDL2_LIBRARY_DIRS})
   target_link_libraries(configuration_test PRIVATE ${MOBIGO2_SDL_TEST_LIBRARIES})
-  target_compile_options(configuration_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS})
+  target_compile_options(configuration_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS} ${MOBIGO2_TEST_ASSERT_FLAGS})
   add_test(NAME configuration_test COMMAND configuration_test)
+
+  add_executable(frontend_model_test
+    tests/frontend_model_test.cpp
+    src/desktop_frontend_model.cpp
+  )
+  target_compile_definitions(frontend_model_test PRIVATE SDL_MAIN_HANDLED)
+  target_include_directories(frontend_model_test PRIVATE src ${SDL2_INCLUDE_DIRS})
+  target_link_directories(frontend_model_test PRIVATE ${SDL2_LIBRARY_DIRS})
+  target_link_libraries(frontend_model_test PRIVATE ${MOBIGO2_SDL_TEST_LIBRARIES})
+  target_compile_options(frontend_model_test PRIVATE ${MOBIGO2_SDL_TEST_CFLAGS} ${MOBIGO2_WARNING_FLAGS} ${MOBIGO2_TEST_ASSERT_FLAGS})
+  add_test(NAME frontend_model_test COMMAND frontend_model_test)
+
+  add_test(NAME cli_contract_test
+    COMMAND ${CMAKE_COMMAND}
+      "-DEMULATOR=$<TARGET_FILE:mobigo2_emu>"
+      "-DFIRMWARE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/firmware"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_contract_test.cmake"
+  )
 endif()
