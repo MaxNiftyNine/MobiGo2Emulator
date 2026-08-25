@@ -32,6 +32,8 @@ jobs:
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - run: cmake --build build --parallel && ctest --test-dir build --output-on-failure
       - name: Build profile-guided release binary
+        env:
+          MOBIGO_NATIVE_OPTIMIZATIONS: ON
         run: ./pgo_build.sh
       - name: Build app bundle
         run: |
