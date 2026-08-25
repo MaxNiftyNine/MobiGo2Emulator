@@ -2,6 +2,7 @@
 #include "boot.hpp"
 #include "desktop_frontend.hpp"
 #include "game_controller.hpp"
+#include "mba_overlay.hpp"
 #include "realtime_throttle.hpp"
 #include "video.hpp"
 
@@ -91,6 +92,27 @@ int main(int argc, char **argv) {
         }
         bus.spi.bytes = read_file_bytes(opt.spi);
         bus.nand.bytes = read_file_bytes(opt.nand);
+        std::optional<MbaOverlayReport> mba_overlay;
+        if (!opt.mba.empty()) {
+          mba_overlay = apply_mba_overlay(
+              bus.nand.bytes, read_file_bytes(opt.mba), opt.mba_target);
+          const MbaOverlayReport &overlay = *mba_overlay;
+          bus.configure_mba_application_target(overlay.entry_address, true);
+          std::cout << "Applied transient MBA overlay: "
+                    << path_to_utf8(opt.mba) << " (" << overlay.mba_bytes
+                    << " bytes, target=" << mba_target_name(overlay.target)
+                    << ", role="
+                    << (overlay.role.empty() ? "<untitled>" : overlay.role)
+                    << ", entry=0x" << std::hex << overlay.entry_address
+                    << std::dec << ")\nReplaced ";
+          for (size_t i = 0; i < overlay.paths.size(); ++i) {
+            if (i != 0)
+              std::cout << ", ";
+            std::cout << overlay.paths[i];
+          }
+          std::cout << " in " << overlay.filesystem_snapshots
+                    << " filesystem snapshot(s); source NAND unchanged\n";
+        }
         if (g_log) {
           g_log << "Hardware config: E-Fuse0=0x" << std::hex << opt.efuse0
                 << " E-Fuse1=0x" << opt.efuse1 << " E-Fuse2=0x" << opt.efuse2
@@ -142,9 +164,13 @@ int main(int argc, char **argv) {
           }
           if (!opt.cart.empty())
             session_title += " - " + path_to_utf8(opt.cart.stem());
+          else if (!opt.mba.empty())
+            session_title += " - " + path_to_utf8(opt.mba.stem());
           SDL_SetWindowTitle(video.win, session_title.c_str());
         };
-        bool window_active = opt.window && opt.open_window_at == 0;
+        const bool deferred_for_mba = opt.window && opt.open_window_on_mba;
+        bool window_active = opt.window && !deferred_for_mba &&
+                             opt.open_window_at == 0;
         if (window_active)
           initialize_video();
 #ifdef __EMSCRIPTEN__
@@ -215,7 +241,11 @@ int main(int argc, char **argv) {
             return;
           const bool instruction_due =
               opt.open_window_at != 0 && cpu.insns >= opt.open_window_at;
-          if (!instruction_due)
+          const bool selected_mba_due =
+              opt.open_window_on_mba && mba_overlay &&
+              bus.mba_launch_count != 0 &&
+              bus.mba_application_entry == mba_overlay->entry_address;
+          if (!instruction_due && !selected_mba_due)
             return;
           initialize_video();
           window_active = true;
@@ -233,7 +263,9 @@ int main(int argc, char **argv) {
           next_present = std::chrono::steady_clock::now();
           if (g_log) {
             g_log << "WINDOW OPENED insns=" << cpu.insns
-                  << " reason=instruction\n";
+                  << " reason="
+                  << (selected_mba_due ? "mba-entry" : "instruction")
+                  << "\n";
           }
         };
         auto update_host_audio_state = [&]() {

@@ -70,6 +70,7 @@ add_executable(mobigo2_emu
   src/desktop_frontend_model.cpp
   src/devices.hpp
   src/game_controller.hpp
+  src/mba_overlay.hpp
   src/realtime_throttle.hpp
   src/ui_font.hpp
   src/video.hpp

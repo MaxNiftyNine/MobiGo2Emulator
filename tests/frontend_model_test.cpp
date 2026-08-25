@@ -202,9 +202,10 @@ void test_config_round_trip(const std::filesystem::path &directory) {
            << "library 1 \"old-launcher.MBA\"\n";
   }
   const FrontendConfig migrated_library = load_config(legacy_library_path, {});
-  require(migrated_library.library.size() == 1 &&
-              migrated_library.library.front().path == "cartridge.bin",
-          "legacy game library did not discard retired MBA launch entries");
+  require(migrated_library.library.size() == 2 &&
+              migrated_library.library[0].path == "cartridge.bin" &&
+              migrated_library.library[1].path == "old-launcher.MBA",
+          "legacy software library did not preserve launchable entries");
 
   const auto overflow_path = directory / "overflow.conf";
   {
@@ -281,6 +282,13 @@ void test_launch_mapping(const std::filesystem::path &directory) {
   require(options.window_scale == 3 && options.fullscreen &&
               options.integer_scaling,
           "GUI presentation choices were lost");
+
+  const LibraryEntry mba{directory / "application.MBA"};
+  const Options application = make_launch_options(defaults, config, mba);
+  require(application.cart.empty() && application.mba == mba.path &&
+              application.mba_target == MbaTarget::Auto &&
+              application.open_window_on_mba,
+          "MBA launch was not mapped to a transient automatic overlay");
 
   const Options system = make_launch_options(defaults, config, std::nullopt);
   require(system.cart.empty(), "system launch retained game-only state");

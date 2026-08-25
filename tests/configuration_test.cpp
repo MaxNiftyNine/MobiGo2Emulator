@@ -70,11 +70,25 @@ void test_cli_surface() {
     const Options wake = options({"--auto-power-wake"});
     require(wake.auto_power_wake, "explicit automatic power wake was ignored");
 
-    for (const char *removed : {"--mode", "--mba", "--mba-target", "--mba-slot",
-                                "--boot", "--usb", "--open-window-on-mba"}) {
+    for (const char *removed : {"--mode", "--boot", "--usb"}) {
         require_throws([&] { options({removed}); },
                        "removed launcher option was still accepted");
     }
+    require(options({"--mba", "test.MBA", "--mba-target", "SY"}).mba_target ==
+                MbaTarget::System,
+            "SY target alias failed");
+    require(options({"--mba", "test.MBA", "--mba-slot", "G1"}).mba_target ==
+                MbaTarget::G1,
+            "G1 slot alias failed");
+    require(options({"--mba", "test.MBA", "--mba-target", "MM"}).mba_target ==
+                MbaTarget::Menu,
+            "MM target alias failed");
+    require_throws([] { options({"--open-window-on-mba"}); },
+                   "MBA-triggered window did not require an MBA");
+    require_throws([] {
+        options({"--mba", "test.MBA", "--open-window-on-mba",
+                 "--open-window-at", "1"});
+    }, "conflicting deferred-window triggers were accepted");
     require_throws([] { options({"--speed-percent", "24"}); },
                    "unsafe speed percentage was accepted");
 
@@ -89,8 +103,8 @@ void test_cli_surface() {
 }
 
 void test_automation_cli_contract() {
-    // Preserve the regular firmware/cart automation surface while deliberately
-    // excluding the retired MBA, USB, boot-path, and execution-mode options.
+    // Preserve the regular firmware/cart automation surface alongside the
+    // transient MBA application surface used by the starter project.
     const Options run = options({
         "--rom", "firmware/internalrom.bin",
         "--spi", "firmware/spi.bin",

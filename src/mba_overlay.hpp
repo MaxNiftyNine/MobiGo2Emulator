@@ -7,20 +7,6 @@
 
 namespace mobigo {
 
-// MBA overlays are retained as an internal image-analysis utility. They are no
-// longer part of the emulator's launcher or command-line interface.
-enum class MbaTarget { Auto, System, G1, Menu };
-
-inline const char *mba_target_name(MbaTarget target) {
-    switch (target) {
-    case MbaTarget::Auto: return "auto";
-    case MbaTarget::System: return "system";
-    case MbaTarget::G1: return "g1";
-    case MbaTarget::Menu: return "menu";
-    }
-    return "unknown";
-}
-
 struct MbaOverlayReport {
     size_t mba_bytes = 0;
     size_t snapshots = 0;

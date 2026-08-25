@@ -264,11 +264,11 @@ FrontendConfig load_config(const std::filesystem::path &path,
       else if (key == "library") {
         std::string value;
         if (stream >> std::quoted(value)) {
-          // Schema 1 stored `library <kind> <path>`. Preserve old cartridge
-          // entries but intentionally discard its retired MBA launcher rows.
+          // Schema 1 stored `library <kind> <path>` where 0 was a cartridge
+          // and 1 was an MBA. Both are launchable again, so preserve either.
           if (value == "0" || value == "1") {
             std::string legacy_path;
-            if (stream >> std::quoted(legacy_path) && value == "0")
+            if (stream >> std::quoted(legacy_path))
               config.library.push_back({path_from_utf8(legacy_path)});
           } else {
             config.library.push_back({path_from_utf8(value)});
@@ -589,8 +589,17 @@ Options make_launch_options(const Options &defaults,
   options.gpio_e = config.gpio_e;
   options.battery_adc = config.battery_adc;
   options.cart.clear();
-  if (game)
-    options.cart = game->path;
+  options.mba.clear();
+  options.mba_target = MbaTarget::Auto;
+  options.open_window_on_mba = false;
+  if (game) {
+    if (ascii_lower(path_to_utf8(game->path.extension())) == ".mba") {
+      options.mba = game->path;
+      options.open_window_on_mba = options.open_window_at == 0;
+    } else {
+      options.cart = game->path;
+    }
+  }
   return options;
 }
 

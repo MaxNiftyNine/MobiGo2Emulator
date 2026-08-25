@@ -185,7 +185,7 @@ open_native_file_dialog(FilePurpose purpose,
   const std::wstring initial = initial_directory.wstring();
   const wchar_t *filter =
       purpose == FilePurpose::Cartridge
-          ? L"MobiGo cartridges\0*.bin;*.rom;*.cart\0All files\0*.*\0\0"
+          ? L"MobiGo software\0*.bin;*.rom;*.cart;*.mba\0All files\0*.*\0\0"
           : L"Image files\0*.bin;*.rom\0All files\0*.*\0\0";
   OPENFILENAMEW dialog{};
   dialog.lStructSize = sizeof(dialog);
@@ -202,7 +202,7 @@ open_native_file_dialog(FilePurpose purpose,
 #elif defined(__APPLE__)
   const char *script =
       purpose == FilePurpose::Cartridge
-          ? "osascript -e 'POSIX path of (choose file with prompt \"Choose a MobiGo cartridge\")'"
+          ? "osascript -e 'POSIX path of (choose file with prompt \"Choose a MobiGo cartridge or MBA application\")'"
           : "osascript -e 'POSIX path of (choose file with prompt \"Choose a firmware image\")'";
   FILE *pipe = popen(script, "r");
   if (!pipe)
@@ -218,7 +218,7 @@ open_native_file_dialog(FilePurpose purpose,
 #else
   const char *command =
       purpose == FilePurpose::Cartridge
-          ? "zenity --file-selection --title='Choose a MobiGo cartridge'"
+          ? "zenity --file-selection --title='Choose a MobiGo cartridge or MBA application'"
           : "zenity --file-selection --title='Choose a firmware image'";
   FILE *pipe = popen(command, "r");
   if (!pipe)
@@ -751,12 +751,6 @@ private:
       return;
     const std::filesystem::path path = path_from_utf8(raw_path);
     SDL_free(const_cast<char *>(raw_path));
-    const std::string extension = ascii_lower(path_to_utf8(path.extension()));
-    if (extension == ".mba") {
-      show_notice("MBA applications are not supported by this desktop release.",
-                  true);
-      return;
-    }
     launch_game(LibraryEntry{path});
   }
 
@@ -1255,7 +1249,9 @@ private:
       painter.text(row.x + 24, row.y + 34,
                    abbreviated(path_to_utf8(entry.path.parent_path()), 105),
                    kMuted, 1);
-      painter.text(row.x + 808, row.y + 23, "CARTRIDGE", kAccent, 1);
+      const bool mba = ascii_lower(path_to_utf8(entry.path.extension())) == ".mba";
+      painter.text(row.x + 808, row.y + 23,
+                   mba ? "APPLICATION" : "CARTRIDGE", kAccent, 1);
       painter.button({944, row.y + 12, 32, 32}, "X");
     }
   }

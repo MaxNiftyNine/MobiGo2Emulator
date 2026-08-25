@@ -11,7 +11,9 @@ without arguments opens the desktop library. From there you can:
 
 - boot the MobiGo 2 system menu;
 - choose a cartridge with the normal Finder/File Explorer dialog;
+- choose an `.MBA` application with the same dialog;
 - drag a cartridge file onto the launcher;
+- drag an `.MBA` file onto the launcher;
 - reopen recent games from the library; and
 - configure firmware, display, audio, controls, and advanced
   diagnostics without editing command lines.
@@ -145,16 +147,32 @@ build/mobigo2_emu \
   --speed-percent 100
 ```
 
+Launch an MBA through the firmware's normal loader with a transient in-memory
+NAND overlay:
+
+```sh
+build/mobigo2_emu \
+  --rom firmware/internalrom.bin \
+  --spi firmware/spi.bin \
+  --nand firmware/nand.bin \
+  --mba MyApplication.MBA \
+  --mba-target auto \
+  --open-window-on-mba
+```
+
+Automatic targeting reads the MBA header and selects the matching system (SY),
+legacy game (G1), or menu (MM) slot. The emulator modifies only its in-memory
+NAND copy; the file passed to `--nand` remains byte-for-byte unchanged.
+
 Use `mobigo2_emu --help` for every development, headless, dump, and trace
 option. The emulator always uses its accurate execution model. `--speed-percent`
 adjusts the requested real-time speed, while `--no-cap` is available for
 headless benchmarks and automated verification.
 
 The no-argument launcher uses native Finder/File Explorer dialogs, stores a
-recent cartridge list, lets each console control be rebound, and shows the
-current percentage of real MobiGo speed in the emulation window title. USB and
-MBA application launching are intentionally not exposed by the launcher or
-CLI.
+recent software list, lets each console control be rebound, and shows the
+current percentage of real MobiGo speed in the emulation window title. USB
+device emulation is not exposed by the launcher or CLI.
 
 To retain the historical argument-free direct-boot behavior for a script, set
 `MOBIGO2_NO_LAUNCHER=1`. Emscripten/browser builds also keep their direct boot

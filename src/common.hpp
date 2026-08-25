@@ -70,6 +70,18 @@ constexpr int kDefaultInstructionBatch = 20000;
 // bit and service intervening video/timer IRQs before completion latches.
 constexpr uint64_t kPpuJobCycles = 160000;
 
+enum class MbaTarget { Auto, System, G1, Menu };
+
+inline const char *mba_target_name(MbaTarget target) {
+    switch (target) {
+    case MbaTarget::Auto: return "auto";
+    case MbaTarget::System: return "system";
+    case MbaTarget::G1: return "g1";
+    case MbaTarget::Menu: return "menu";
+    }
+    return "unknown";
+}
+
 struct TouchAdcPoint {
     uint16_t x;
     uint16_t y;
@@ -204,6 +216,15 @@ inline std::string ascii_lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return char(std::tolower(c)); });
     return value;
+}
+
+inline MbaTarget parse_mba_target(std::string value) {
+    value = ascii_lower(std::move(value));
+    if (value == "auto") return MbaTarget::Auto;
+    if (value == "system" || value == "sy") return MbaTarget::System;
+    if (value == "g1" || value == "game1") return MbaTarget::G1;
+    if (value == "menu" || value == "mm") return MbaTarget::Menu;
+    die("--mba-target expects auto, system/SY, g1/G1, or menu/MM");
 }
 
 // SDL2main supplies UTF-8 argv and file-drop paths on Windows. Keep persisted
@@ -376,6 +397,8 @@ struct Options {
     std::filesystem::path cart;
     std::filesystem::path spi = "spi.bin";
     std::filesystem::path nand = "nand.bin";
+    std::filesystem::path mba;
+    MbaTarget mba_target = MbaTarget::Auto;
     std::filesystem::path dump_frame;
     std::filesystem::path dump_current_frame;
     std::filesystem::path dump_frame_dir;
@@ -390,6 +413,7 @@ struct Options {
     uint32_t max_present_hz = 60;
     uint32_t speed_percent = 100;
     uint64_t open_window_at = 0;
+    bool open_window_on_mba = false;
     uint64_t start_logging_at = 0;
     uint64_t dump_frame_interval = 0;
     uint64_t trace_limit = 0;
@@ -456,6 +480,9 @@ inline Options parse_args(int argc, char **argv) {
         else if (a == "--cart") opt.cart = need_path("--cart");
         else if (a == "--spi") opt.spi = need_path("--spi");
         else if (a == "--nand") opt.nand = need_path("--nand");
+        else if (a == "--mba") opt.mba = need_path("--mba");
+        else if (a == "--mba-target" || a == "--mba-slot")
+            opt.mba_target = parse_mba_target(need(a.c_str()));
         else if (a == "--rom-base") opt.rom_base = uint32_t(std::stoul(need("--rom-base"), nullptr, 0));
         else if (a == "--rom-endian") opt.rom_endian = need("--rom-endian");
         else if (a == "--start-pc") {
@@ -469,6 +496,7 @@ inline Options parse_args(int argc, char **argv) {
         else if (a == "--speed-percent") opt.speed_percent = uint32_t(
             std::stoul(need("--speed-percent")));
         else if (a == "--open-window-at") opt.open_window_at = std::stoull(need("--open-window-at"));
+        else if (a == "--open-window-on-mba") opt.open_window_on_mba = true;
         else if (a == "--start-logging-at") opt.start_logging_at = std::stoull(need("--start-logging-at"));
         else if (a == "--dump-frame") opt.dump_frame = need_path("--dump-frame");
         else if (a == "--dump-current-frame") opt.dump_current_frame = need_path("--dump-current-frame");
@@ -601,6 +629,8 @@ Images:
   --spi PATH                 SPI flash image
   --nand PATH                NAND image
   --cart PATH                Cartridge image
+  --mba PATH                 MBA application (transient in-memory NAND overlay)
+  --mba-target TARGET        auto, system/SY, g1/G1, or menu/MM
   --rom-base ADDRESS         Internal ROM word address
   --rom-endian le|be         Internal ROM byte order
   --start-pc ADDRESS         Override reset program counter
@@ -611,6 +641,7 @@ Execution and presentation:
   --render-interval N        Instructions between renderer updates
   --max-present-hz N         Host presentation rate (0 uses automatic 120 Hz)
   --open-window-at N         Defer the window until instruction N
+  --open-window-on-mba       Defer the window until the selected MBA starts
   --no-window                Run headlessly
   --cap / --no-cap           Enable or disable real-time host pacing
   --vsync                    Synchronize window presentation
@@ -661,6 +692,12 @@ Hardware research options:
     }
     if (opt.speed_percent < 25 || opt.speed_percent > 400)
         die("--speed-percent must be between 25 and 400");
+    if (opt.open_window_on_mba && opt.mba.empty())
+        die("--open-window-on-mba requires --mba");
+    if (opt.mba.empty() && opt.mba_target != MbaTarget::Auto)
+        die("--mba-target/--mba-slot requires --mba");
+    if (opt.open_window_on_mba && opt.open_window_at != 0)
+        die("--open-window-on-mba and --open-window-at are mutually exclusive");
     std::sort(opt.scripted_touches.begin(), opt.scripted_touches.end(),
               [](const ScriptedTouch &a, const ScriptedTouch &b) { return a.at < b.at; });
     for (size_t i = 1; i < opt.scripted_touches.size(); ++i) {
