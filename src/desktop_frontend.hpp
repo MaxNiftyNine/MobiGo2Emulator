@@ -13,7 +13,7 @@ struct LibraryEntry {
 };
 
 struct FrontendConfig {
-  static constexpr unsigned kSchemaVersion = 3;
+  static constexpr unsigned kSchemaVersion = 4;
 
   std::filesystem::path rom;
   std::filesystem::path spi;
@@ -24,6 +24,7 @@ struct FrontendConfig {
   int window_scale = 2;
   bool audio = true;
   bool show_speed = true;
+  bool uncapped_speed = false;
   bool fullscreen = false;
   bool integer_scaling = true;
   InputBindings input_bindings;

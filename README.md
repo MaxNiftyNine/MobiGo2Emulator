@@ -15,7 +15,7 @@ without arguments opens the desktop library. From there you can:
 - drag a cartridge file onto the launcher;
 - drag an `.MBA` file onto the launcher;
 - reopen recent games from the library; and
-- configure firmware, display, audio, controls, and advanced
+- configure firmware, display, audio, capped or uncapped speed, controls, and advanced
   diagnostics without editing command lines.
 
 Closing a running game or pressing F10 returns to the library, so another title

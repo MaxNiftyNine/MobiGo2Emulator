@@ -174,6 +174,7 @@ FrontendConfig config_from_defaults(const Options &defaults) {
   config.nand = defaults.nand;
   config.audio = true;
   config.show_speed = true;
+  config.uncapped_speed = !defaults.realtime_cap;
   config.input_bindings = defaults.input_bindings;
   config.rom_endian = defaults.rom_endian;
   config.max_steps = defaults.max_steps;
@@ -281,6 +282,8 @@ FrontendConfig load_config(const std::filesystem::path &path,
         read_config_bool(stream, config.audio);
       else if (key == "show_speed")
         read_config_bool(stream, config.show_speed);
+      else if (key == "uncapped_speed")
+        read_config_bool(stream, config.uncapped_speed);
       else if (key == "fullscreen")
         read_config_bool(stream, config.fullscreen);
       else if (key == "integer_scaling")
@@ -398,6 +401,7 @@ void save_config(const std::filesystem::path &path,
          << "window_scale " << config.window_scale << '\n'
          << "audio " << config.audio << '\n'
          << "show_speed " << config.show_speed << '\n'
+         << "uncapped_speed " << config.uncapped_speed << '\n'
          << "fullscreen " << config.fullscreen << '\n'
          << "integer_scaling " << config.integer_scaling << '\n'
          << "rom_endian " << config.rom_endian << '\n'
@@ -529,8 +533,9 @@ Options make_launch_options(const Options &defaults,
   options.rom = config.rom;
   options.spi = config.spi;
   options.nand = config.nand;
-  // Player-facing sessions target real MobiGo speed. Rendering stays at the
-  // automatic safe rate so it cannot race ahead or starve guest execution.
+  // Player-facing sessions default to real MobiGo speed, with an explicit
+  // settings toggle for running as fast as the host allows. Rendering stays
+  // at the automatic safe rate so it cannot starve guest execution.
   options.max_present_hz = 0;
   options.speed_percent = 100;
   options.audio = config.audio;
@@ -539,7 +544,7 @@ Options make_launch_options(const Options &defaults,
   // one batch per display refresh (roughly 10-20% speed). The real-time
   // throttle owns guest pacing; presentation is independently capped below.
   options.vsync = false;
-  options.realtime_cap = true;
+  options.realtime_cap = !config.uncapped_speed;
   options.realtime_cap_explicit = true;
   options.show_speed = config.show_speed;
   options.input_bindings = config.input_bindings;

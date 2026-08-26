@@ -83,6 +83,7 @@ void test_config_round_trip(const std::filesystem::path &directory) {
   source.nand = directory / "nand.bin";
   source.last_directory = directory / "game folder";
   source.show_speed = false;
+  source.uncapped_speed = true;
   source.input_bindings.keys[static_cast<size_t>(BindableControl::Primary)] = SDLK_SPACE;
   source.window_scale = 4;
   source.audio = false;
@@ -122,7 +123,7 @@ void test_config_round_trip(const std::filesystem::path &directory) {
           "quoted configuration paths did not round-trip");
   require(path_to_utf8(loaded.rom).find("café 日本") != std::string::npos,
           "non-ASCII configuration path lost its UTF-8 spelling");
-  require(!loaded.show_speed &&
+  require(!loaded.show_speed && loaded.uncapped_speed &&
               loaded.input_bindings.keys[static_cast<size_t>(BindableControl::Primary)] == SDLK_SPACE,
           "speed display or custom control did not round-trip");
   require(loaded.window_scale == 4 &&
@@ -269,6 +270,7 @@ void test_launch_mapping(const std::filesystem::path &directory) {
   config.fullscreen = true;
   config.integer_scaling = true;
   config.show_speed = false;
+  config.uncapped_speed = false;
   config.input_bindings.keys[static_cast<size_t>(BindableControl::Primary)] = SDLK_SPACE;
   const LibraryEntry cart{directory / "game.bin"};
   const Options options = make_launch_options(defaults, config, cart);
@@ -279,6 +281,10 @@ void test_launch_mapping(const std::filesystem::path &directory) {
               !options.vsync && !options.show_speed &&
               options.input_bindings.keys[static_cast<size_t>(BindableControl::Primary)] == SDLK_SPACE,
           "GUI real-time defaults or custom controls were lost");
+  config.uncapped_speed = true;
+  const Options uncapped = make_launch_options(defaults, config, cart);
+  require(!uncapped.realtime_cap && uncapped.realtime_cap_explicit,
+          "GUI uncapped-speed setting was not mapped");
   require(options.window_scale == 3 && options.fullscreen &&
               options.integer_scaling,
           "GUI presentation choices were lost");

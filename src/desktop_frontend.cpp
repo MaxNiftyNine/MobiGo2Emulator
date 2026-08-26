@@ -892,6 +892,8 @@ private:
       config_.audio = !config_.audio;
     else if (contains({240, 226, 52, 28}, x, y))
       config_.show_speed = !config_.show_speed;
+    else if (contains({240, 277, 52, 28}, x, y))
+      config_.uncapped_speed = !config_.uncapped_speed;
     else if (contains({595, 175, 52, 28}, x, y))
       config_.fullscreen = !config_.fullscreen;
     else if (contains({595, 226, 52, 28}, x, y))
@@ -1272,6 +1274,8 @@ private:
     painter.toggle({180, 175, 52, 28}, config_.audio);
     painter.text(32, 234, "SHOW SPEED", kText, 2);
     painter.toggle({240, 226, 52, 28}, config_.show_speed);
+    painter.text(32, 285, "UNCAPPED SPEED", kText, 2);
+    painter.toggle({240, 277, 52, 28}, config_.uncapped_speed);
 
     painter.text(390, 183, "FULLSCREEN", kText, 2);
     painter.toggle({595, 175, 52, 28}, config_.fullscreen);
