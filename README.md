@@ -1,6 +1,6 @@
-# MobiGo 2 Emulator
+# MobiGo Emulator
 
-A C++20 emulator for the VTech MobiGo 2 and its GPL16250-class unSP system.
+A C++20 emulator for the VTech MobiGo (1 and 2) and its GPL16250-class unSP system.
 It models the CPU, display/PPU, DMA, keyboard, touch panel, motion sensor,
 timers, watchdog, audio, and storage hardware.
 
