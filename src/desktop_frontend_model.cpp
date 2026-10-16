@@ -126,7 +126,7 @@ std::string FirmwareStatus::message() const {
     details +=
         state == FirmwareFileState::Missing ? " missing" : " has wrong size";
   };
-  append(rom, "internal ROM");
+  append(rom, "ROM");
   append(spi, "SPI image");
   append(nand, "NAND image");
   return details;
@@ -169,6 +169,8 @@ std::filesystem::path default_config_path() {
 
 FrontendConfig config_from_defaults(const Options &defaults) {
   FrontendConfig config;
+  config.mobigo1 = !defaults.mobigo1_rom.empty();
+  config.mobigo1_rom = defaults.mobigo1_rom;
   config.rom = defaults.rom;
   config.spi = defaults.spi;
   config.nand = defaults.nand;
@@ -254,7 +256,11 @@ FrontendConfig load_config(const std::filesystem::path &path,
       }
       if (key.empty())
         continue;
-      if (key == "rom")
+      if (key == "mobigo1")
+        read_config_bool(stream, config.mobigo1);
+      else if (key == "mobigo1_rom")
+        read_path(config.mobigo1_rom);
+      else if (key == "rom")
         read_path(config.rom);
       else if (key == "spi")
         read_path(config.spi);
@@ -394,6 +400,8 @@ void save_config(const std::filesystem::path &path,
   std::ostringstream output;
   output << "# MobiGo 2 Emulator desktop settings\n"
          << "schema " << FrontendConfig::kSchemaVersion << '\n'
+         << "mobigo1 " << config.mobigo1 << '\n'
+         << "mobigo1_rom " << quoted_path(config.mobigo1_rom) << '\n'
          << "rom " << quoted_path(config.rom) << '\n'
          << "spi " << quoted_path(config.spi) << '\n'
          << "nand " << quoted_path(config.nand) << '\n'
@@ -480,6 +488,12 @@ void remember_game(FrontendConfig &config, const LibraryEntry &entry,
 }
 
 FirmwareStatus firmware_status(const FrontendConfig &config) {
+  if (config.mobigo1) {
+    auto state = firmware_file_state(config.mobigo1_rom, 2097152);
+    if (state == FirmwareFileState::WrongSize)
+      state = firmware_file_state(config.mobigo1_rom, 8388608);
+    return {state, FirmwareFileState::Ready, FirmwareFileState::Ready};
+  }
   return {
       firmware_file_state(config.rom, 131072),
       firmware_file_state(config.spi, 2097152),
@@ -530,6 +544,7 @@ Options make_launch_options(const Options &defaults,
                             const FrontendConfig &config,
                             const std::optional<LibraryEntry> &game) {
   Options options = defaults;
+  options.mobigo1_rom = config.mobigo1 ? config.mobigo1_rom : std::filesystem::path{};
   options.rom = config.rom;
   options.spi = config.spi;
   options.nand = config.nand;

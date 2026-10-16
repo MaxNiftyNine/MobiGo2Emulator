@@ -758,3 +758,32 @@ assembled NAND is `firmware/nand.bin`.
 - Any behavior inferred from firmware access patterns instead of documentation is
   marked in source comments with `ASSUMPTION`.
 - Temporary workarounds must be labelled `WORKAROUND` in code and notes.
+
+
+## 2026-10-16: MobiGo 1 US external-ROM boot
+
+- **Verified (dump and execution):** `mobigo1bios/mobigo.bin` is 8 MiB.
+  Little-endian word `0xfff7` is `0xf000`. The reset code initializes MCS0 to
+  `0x3f47`, MCS1 to `0x3f47`, MCS2 to `0xff87`, MCS3 to `0x3f86`, and MCS4
+  to `0x0086`, then branches to CPU word `0x030000`.
+- **Verified (execution):** The startup reads its BIOS dispatch table through
+  DS=2, R1=`0x002c` at PC `0x030124`. Routing CPU `0x02002c` to zero-filled
+  RAM produces a zero function pointer and a later indirect call to address
+  zero at `0x03022c`. Mapping `0x020000..0x02ffff` to the first external-ROM
+  page fixes this failure. The MobiGo 2 SDRAM aperture remains unchanged.
+- **Emulator-inferred mapping:** MobiGo 1 CS0 contains the external NOR with
+  physical base `0x020000`; the vector page mirrors ROM at `0x008000..0x00ffff`.
+  CS1 uses separate RAM relative to its programmed MCS start. CS3 uses the
+  cartridge mapping; unfitted selects read high and ignore stores. ROM stores
+  are ignored, and internal RAM remains writable. These mappings are covered
+  by synthetic, firmware-free regressions.
+- **Verified (emulator output):** The US dump completes 300,000,000 instructions
+  at PC `0x0205dd`, cycles `797566143`, without invalid-opcode failure. The
+  final 320x240 frame displays a blue **Please insert a cartridge** screen,
+  with a console image and yellow arrow. Logged and unlogged runs reach the
+  same checkpoint. This establishes OS boot, not physical hardware accuracy
+  or cartridge gameplay compatibility.
+- **Unknown:** MobiGo 1 settings EEPROM, full audio/input behavior, cartridge
+  gameplay, and other regional revisions. The Spanish dump was excluded from
+  this task's compatibility target at the user's request; its integrity is
+  not established. No guest code or firmware files were patched.

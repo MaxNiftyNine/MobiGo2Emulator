@@ -55,6 +55,9 @@ void require_throws(Function &&function, const char *message) {
 }
 
 void test_cli_surface() {
+    const auto mobigo1 = options({"--mobigo1-rom", "mobigo1bios/mobigo.bin"});
+    require(mobigo1.mobigo1_rom == "mobigo1bios/mobigo.bin",
+            "MobiGo 1 ROM option was not parsed");
     const Options defaults = options({});
     require(defaults.realtime_cap, "accurate mode unexpectedly disabled pacing");
     require(defaults.speed_percent == 100, "default speed is not real-time");

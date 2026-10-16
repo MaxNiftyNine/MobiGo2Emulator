@@ -30,6 +30,7 @@ struct Bus {
     std::array<uint16_t, 0x800> sprite_ram{};
     std::array<uint16_t, 0x400> sound_ram{};
     std::array<uint32_t, 32> spu_channel_start_sequence{};
+    std::vector<uint16_t> board_rom; // MobiGo 1: CS0 ROM and low boot mirror
     std::vector<uint16_t> internal_rom;
     uint32_t internal_rom_base = 0x008000;
     bool internal_rom_shadow_low = true;
@@ -694,6 +695,12 @@ struct Bus {
     }
 
     bool internal_rom_base_contains(uint32_t addr) const {
+        // External-ROM boot mirrors the vector page below 0x10000.
+        // CS0 also starts a page before the MobiGo 2 SDRAM aperture: the
+        // US startup reads its BIOS pointer table at DS=2, R1=0x002c.
+        if (!board_rom.empty())
+            return (addr >= 0x8000 && addr < 0x10000) ||
+                   (addr >= 0x20000 && addr < kCsBase);
         if (internal_rom.empty()) return false;
         if (addr < internal_rom_base) return false;
         return (addr - internal_rom_base) < internal_rom.size();
@@ -834,6 +841,10 @@ struct Bus {
     }
 
     uint16_t internal_rom_base_read(uint32_t addr) const {
+        if (!board_rom.empty()) {
+            const uint32_t offset = addr >= 0x20000 ? addr - 0x20000 : addr;
+            return board_rom[offset % board_rom.size()];
+        }
         return internal_rom[addr - internal_rom_base];
     }
 
@@ -1183,6 +1194,13 @@ struct Bus {
     }
 
     uint16_t cs_read(uint32_t offset) {
+        if (!board_rom.empty()) {
+            const uint32_t physical = offset + kCsBase;
+            if (physical < mcs_start(1))
+                return board_rom[(physical - 0x20000) % board_rom.size()];
+            if (physical < mcs_start(2))
+                return sdram[(physical - mcs_start(1)) & (kSdramWords - 1)];
+        }
         uint32_t cart_offset = 0;
         if (cart_address(offset, cart_offset)) {
             const uint16_t value = cart_mem[cart_offset];
@@ -1195,12 +1213,21 @@ struct Bus {
             }
             return value;
         }
+        if (!board_rom.empty()) return 0xffff; // Unpopulated chip select.
         // The physical EM638165TS-6G is a 4M x16 SDRAM, so addresses beyond
         // its fitted capacity wrap over the chip's connected address lines.
         return sdram[offset & (kSdramWords - 1)];
     }
 
     void cs_write(uint32_t offset, uint16_t value) {
+        if (!board_rom.empty()) {
+            const uint32_t physical = offset + kCsBase;
+            if (physical < mcs_start(1)) return;
+            if (physical < mcs_start(2)) {
+                sdram[(physical - mcs_start(1)) & (kSdramWords - 1)] = value;
+                return;
+            }
+        }
         if (g_log && offset == 0x00000e) {
             g_log << "MODULE STATE write pc=0x" << std::hex << pc_for_log
                   << " addr=0x3000e old=0x" << sdram[offset]
@@ -1213,6 +1240,7 @@ struct Bus {
             // command-sequence emulation can be added if software needs it.
             return;
         }
+        if (!board_rom.empty()) return;
         sdram[offset & (kSdramWords - 1)] = value;
     }
 

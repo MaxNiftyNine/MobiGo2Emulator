@@ -73,6 +73,11 @@ a clock or timer must invalidate or recompute that deadline.
 - `0x030000+`: external chip-select space (SDRAM and cartridge NOR)
 - `0x200000+`: banked external chip-select window
 
+For MobiGo 1 external-ROM boot (`--mobigo1-rom`), CS0 holds read-only NOR,
+including the `0x020000..0x02ffff` page and a low vector mirror at
+`0x008000..0x00ffff`. CS1 holds separate RAM and CS3 holds the cartridge.
+The MobiGo 2 mapping below remains the default.
+
 The fitted SDRAM is 4M x 16-bit and wraps on its connected address lines.
 Cartridges occupy the CS3 NOR aperture selected by the MCS registers; ordinary
 stores must never mutate cartridge data.  Instruction fetch and data access are

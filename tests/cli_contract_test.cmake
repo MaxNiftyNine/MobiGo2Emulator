@@ -76,3 +76,22 @@ endif()
 if(NOT bounded_stderr STREQUAL "")
   message(FATAL_ERROR "bounded launch unexpectedly wrote stderr: ${bounded_stderr}")
 endif()
+
+# The MobiGo 1 button relies on firmware bundled beside the executable,
+# independently of the process working directory and the MobiGo 2 images.
+execute_process(
+  COMMAND "${EMULATOR}" --mobigo1-rom mobigo.bin --no-window --no-cap --steps 1
+  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+  RESULT_VARIABLE mobigo1_status
+  OUTPUT_VARIABLE mobigo1_stdout
+  ERROR_VARIABLE mobigo1_stderr
+  TIMEOUT 15
+)
+if(NOT mobigo1_status EQUAL 0 OR NOT mobigo1_stderr STREQUAL "")
+  message(FATAL_ERROR
+    "bundled MobiGo 1 launch failed: ${mobigo1_stdout}${mobigo1_stderr}")
+endif()
+string(FIND "${mobigo1_stdout}" "Stopped after 1 instructions at PC=0xf001" mobigo1_at)
+if(mobigo1_at EQUAL -1)
+  message(FATAL_ERROR "bundled MobiGo 1 ROM did not reach reset entry: ${mobigo1_stdout}")
+endif()

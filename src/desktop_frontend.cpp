@@ -344,13 +344,24 @@ struct TextPrompt {
 
 class Launcher {
 public:
-  Launcher(Options defaults, const char *)
+  Launcher(Options defaults, const char *argv0)
       : defaults_(std::move(defaults)), config_path_(default_config_path()),
         config_(load_config(config_path_, config_from_defaults(defaults_))) {
     // A moved/new release should heal stale absolute paths saved by an
     // older package whenever the newly resolved bundled image is valid.
-    const FirmwareStatus saved = firmware_status(config_);
+    FrontendConfig saved_mobigo2 = config_;
+    saved_mobigo2.mobigo1 = false;
+    const FirmwareStatus saved = firmware_status(saved_mobigo2);
     const FrontendConfig packaged = config_from_defaults(defaults_);
+    Options mobigo1_defaults = defaults_;
+    mobigo1_defaults.mobigo1_rom = "mobigo.bin";
+    resolve_packaged_firmware(mobigo1_defaults, argv0);
+    const FrontendConfig packaged_mobigo1 = config_from_defaults(mobigo1_defaults);
+    FrontendConfig saved_mobigo1 = config_;
+    saved_mobigo1.mobigo1 = true;
+    if (!firmware_status(saved_mobigo1).ready() &&
+        firmware_status(packaged_mobigo1).ready())
+      config_.mobigo1_rom = packaged_mobigo1.mobigo1_rom;
     const FirmwareStatus bundled = firmware_status(packaged);
     if (saved.rom != FirmwareFileState::Ready &&
         bundled.rom == FirmwareFileState::Ready)
@@ -476,7 +487,7 @@ private:
   std::filesystem::path native_dialog_start(FilePurpose purpose) const {
     std::filesystem::path configured;
     if (purpose == FilePurpose::Rom)
-      configured = config_.rom;
+      configured = config_.mobigo1 ? config_.mobigo1_rom : config_.rom;
     else if (purpose == FilePurpose::Spi)
       configured = config_.spi;
     else if (purpose == FilePurpose::Nand)
@@ -692,8 +703,9 @@ private:
   void choose_file(FilePurpose purpose, const std::filesystem::path &path) {
     config_.last_directory = path.parent_path();
     if (purpose == FilePurpose::Rom) {
-      config_.rom = path;
-      show_notice("Internal ROM selected");
+      if (config_.mobigo1) config_.mobigo1_rom = path;
+      else config_.rom = path;
+      show_notice(config_.mobigo1 ? "MobiGo 1 ROM selected" : "Internal ROM selected");
     } else if (purpose == FilePurpose::Spi) {
       config_.spi = path;
       show_notice("SPI image selected");
@@ -708,6 +720,11 @@ private:
   }
 
   void launch_game(const std::optional<LibraryEntry> &game) {
+    if (game && config_.mobigo1 &&
+        ascii_lower(path_to_utf8(game->path.extension())) == ".mba") {
+      show_notice("MBA launch requires MobiGo 2. Change the console in Config.", true);
+      return;
+    }
     const FirmwareStatus status = firmware_status(config_);
     if (!status.ready()) {
       show_notice(status.message() + ". Choose valid images below.", true);
@@ -834,9 +851,13 @@ private:
       else if (contains({232, 0, 88, 92}, x, y) && selected_library_index_ &&
                *selected_library_index_ < config_.library.size())
         launch_game(config_.library[*selected_library_index_]);
-      else if (contains({325, 0, 104, 92}, x, y))
+      else if (contains({325, 0, 104, 46}, x, y)) {
+        config_.mobigo1 = false;
         launch_game(std::nullopt);
-      else if (contains({448, 0, 104, 92}, x, y)) {
+      } else if (contains({325, 46, 104, 46}, x, y)) {
+        config_.mobigo1 = true;
+        launch_game(std::nullopt);
+      } else if (contains({448, 0, 104, 92}, x, y)) {
         config_.fullscreen = !config_.fullscreen;
         persist();
       } else if (contains({692, 0, 96, 92}, x, y)) {
@@ -902,11 +923,13 @@ private:
       config_.window_scale = std::max(1, config_.window_scale - 1);
     else if (contains({650, 277, 38, 34}, x, y))
       config_.window_scale = std::min(6, config_.window_scale + 1);
+    else if (contains({248, 545, 180, 34}, x, y))
+      config_.mobigo1 = !config_.mobigo1;
     else if (contains({844, 380, 132, 34}, x, y))
       open_native_dialog(FilePurpose::Rom);
-    else if (contains({844, 425, 132, 34}, x, y))
+    else if (contains({844, 425, 132, 34}, x, y) && !config_.mobigo1)
       open_native_dialog(FilePurpose::Spi);
-    else if (contains({844, 470, 132, 34}, x, y))
+    else if (contains({844, 470, 132, 34}, x, y) && !config_.mobigo1)
       open_native_dialog(FilePurpose::Nand);
     else if (contains({810, 630, 166, 34}, x, y))
       page_ = Page::Advanced;
@@ -1118,12 +1141,16 @@ private:
   }
 
   void restore_defaults() {
+    const auto mobigo1_rom = config_.mobigo1_rom;
+    const bool mobigo1 = config_.mobigo1;
     const std::filesystem::path rom = config_.rom;
     const std::filesystem::path spi = config_.spi;
     const std::filesystem::path nand = config_.nand;
     const std::filesystem::path last_directory = config_.last_directory;
     std::vector<LibraryEntry> library = std::move(config_.library);
     config_ = config_from_defaults(defaults_);
+    config_.mobigo1_rom = mobigo1_rom;
+    config_.mobigo1 = mobigo1;
     config_.rom = rom;
     config_.spi = spi;
     config_.nand = nand;
@@ -1180,14 +1207,14 @@ private:
 
   void render_toolbar_item(const Painter &painter, const SDL_Rect &area,
                            std::string_view label,
-                           bool enabled = true, bool active = false) const {
+                           bool enabled = true, bool active = false, int scale = 2) const {
     const bool hovered = enabled && contains(area, painter.mouse_x, painter.mouse_y);
     if (hovered || active)
       painter.fill(area, active ? SDL_Color{61, 79, 83, 255} : kPanel);
-    const int width = system_text_width(label, 2);
+    const int width = system_text_width(label, scale);
     painter.text(area.x + (area.w - width) / 2,
-                 area.y + (area.h - system_text_height(2)) / 2, label,
-                 enabled ? kText : SDL_Color{96, 96, 96, 255}, 2);
+                 area.y + (area.h - system_text_height(scale)) / 2, label,
+                 enabled ? kText : SDL_Color{96, 96, 96, 255}, scale);
   }
 
   void render_toolbar(const Painter &painter) const {
@@ -1200,7 +1227,11 @@ private:
     render_toolbar_item(painter, {105, 0, 96, height}, "Refresh");
     render_toolbar_item(painter, {232, 0, 88, height}, "Play",
                         game_selected);
-    render_toolbar_item(painter, {325, 0, 104, height}, "System");
+    render_toolbar_item(painter, {325, 0, 104, 46}, "System (MobiGo 2)",
+                        true, false, 1);
+    painter.line(329, 46, 425, 46, kBorder);
+    render_toolbar_item(painter, {325, 46, 104, 46}, "System (MobiGo 1)",
+                        true, false, 1);
     render_toolbar_item(painter, {448, 0, 104, height}, "FullScr", true,
                         config_.fullscreen);
     render_toolbar_item(painter, {557, 0, 100, height}, "ScrShot", false);
@@ -1289,6 +1320,15 @@ private:
 
     painter.text(32, 355, "FIRMWARE", kMuted, 1);
     const FirmwareStatus status = firmware_status(config_);
+    painter.text(32, 556, "CONSOLE", kText, 2);
+    painter.button({248, 545, 180, 34}, config_.mobigo1 ? "MOBIGO 1" : "MOBIGO 2");
+    if (config_.mobigo1) {
+      render_firmware_row(painter, 380, "MOBIGO 1 ROM", config_.mobigo1_rom, status.rom);
+      painter.text(32, 435, "2 OR 8 MIB EXTERNAL ROM · LITTLE ENDIAN", kMuted, 1);
+      painter.text(32, 470, "EXPERIMENTAL: US OS BOOT VERIFIED; OTHER IMAGES UNVERIFIED", kMuted, 1);
+      painter.button({810, 630, 166, 34}, "ADVANCED >");
+      return;
+    }
     render_firmware_row(painter, 380, "INTERNAL ROM", config_.rom, status.rom);
     render_firmware_row(painter, 425, "SPI IMAGE", config_.spi, status.spi);
     render_firmware_row(painter, 470, "NAND IMAGE", config_.nand, status.nand);

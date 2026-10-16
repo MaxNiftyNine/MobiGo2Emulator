@@ -13,8 +13,10 @@ struct LibraryEntry {
 };
 
 struct FrontendConfig {
-  static constexpr unsigned kSchemaVersion = 4;
+  static constexpr unsigned kSchemaVersion = 5;
 
+  bool mobigo1 = false;
+  std::filesystem::path mobigo1_rom;
   std::filesystem::path rom;
   std::filesystem::path spi;
   std::filesystem::path nand;

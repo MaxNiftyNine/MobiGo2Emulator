@@ -23,6 +23,39 @@ void require_throws(Function &&function, const char *message) {
   throw std::runtime_error(message);
 }
 
+void test_mobigo1_firmware_and_selection(const std::filesystem::path &directory) {
+  FrontendConfig config;
+  config.mobigo1 = true;
+  config.mobigo1_rom = directory / "mobigo1.bin";
+  require(!firmware_status(config).ready(), "missing MobiGo 1 ROM was accepted");
+  {
+    std::ofstream output(config.mobigo1_rom, std::ios::binary);
+    output.seekp(8388608 - 1);
+    output.put('\0');
+  }
+  require(firmware_status(config).ready(),
+          "MobiGo 1 incorrectly required MobiGo 2 SPI/NAND firmware");
+  const auto path = directory / "mobigo1.conf";
+  save_config(path, config);
+  const auto loaded = load_config(path, FrontendConfig{});
+  require(loaded.mobigo1 && loaded.mobigo1_rom == config.mobigo1_rom,
+          "MobiGo 1 selection did not survive config reload");
+  const auto options = make_launch_options(Options{}, loaded, std::nullopt);
+  require(options.mobigo1_rom == config.mobigo1_rom && options.mba.empty(),
+          "launcher did not select MobiGo 1 boot");
+  config.mobigo1 = false;
+  require(make_launch_options(options, config, std::nullopt).mobigo1_rom.empty(),
+          "switching back to MobiGo 2 retained MobiGo 1 boot");
+  require(!firmware_status(config).ready(),
+          "switching back to MobiGo 2 bypassed its firmware checks");
+  config.mobigo1 = true;
+  std::filesystem::resize_file(config.mobigo1_rom, 2097152);
+  require(firmware_status(config).ready(), "2 MiB MobiGo 1 ROM was rejected");
+  std::filesystem::resize_file(config.mobigo1_rom, 131072);
+  require(firmware_status(config).rom == FirmwareFileState::WrongSize,
+          "MobiGo 2 internal ROM was accepted as MobiGo 1 external ROM");
+}
+
 void test_numeric_editor_parser() {
   require(parse_ui_unsigned("010") == 10,
           "leading-zero decimal was treated as octal");
@@ -353,6 +386,7 @@ int main() {
            std::chrono::steady_clock::now().time_since_epoch().count()));
   try {
     std::filesystem::create_directories(directory);
+    test_mobigo1_firmware_and_selection(directory);
     test_launcher_routing();
     test_numeric_editor_parser();
     test_utf8_bitmap_text();

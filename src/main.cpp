@@ -83,15 +83,22 @@ int main(int argc, char **argv) {
           rom_big_endian = false;
         else
           die("unknown ROM endian: " + opt.rom_endian);
-        bus.internal_rom =
-            bytes_to_words(read_file_bytes(opt.rom), rom_big_endian);
+        if (!opt.mobigo1_rom.empty()) {
+          if (!opt.mba.empty()) die("MobiGo 1 does not support the MobiGo 2 NAND MBA overlay");
+          const auto bytes = read_file_bytes(opt.mobigo1_rom);
+          if (bytes.size() != 0x200000 && bytes.size() != 0x800000)
+            die("MobiGo 1 ROM must be exactly 2 MiB or 8 MiB");
+          bus.board_rom = bytes_to_words(bytes, false);
+        } else {
+          bus.internal_rom = bytes_to_words(read_file_bytes(opt.rom), rom_big_endian);
+          bus.spi.bytes = read_file_bytes(opt.spi);
+          bus.nand.bytes = read_file_bytes(opt.nand);
+        }
         if (!opt.cart.empty()) {
           const auto cart_words =
               bytes_to_words(read_file_bytes(opt.cart), false);
           bus.cart_mem = cart_words;
         }
-        bus.spi.bytes = read_file_bytes(opt.spi);
-        bus.nand.bytes = read_file_bytes(opt.nand);
         std::optional<MbaOverlayReport> mba_overlay;
         if (!opt.mba.empty()) {
           mba_overlay = apply_mba_overlay(
@@ -142,13 +149,14 @@ int main(int argc, char **argv) {
         GameControllerInput game_controller;
         SessionResources session_resources{bus, video, audio, game_controller};
         bool fullscreen_active = opt.fullscreen;
-        std::string session_title = "MobiGo 2 Emulator";
+        std::string session_title = opt.mobigo1_rom.empty() ? "MobiGo 2 Emulator" : "MobiGo 1 Emulator";
         auto initialize_video = [&]() {
           if (desktop_session) {
             SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
                         opt.integer_scaling ? "0" : "1");
           }
           video.init(opt.vsync);
+          SDL_SetWindowTitle(video.win, session_title.c_str());
           if (!desktop_session)
             return;
           SDL_SetWindowMinimumSize(video.win, Video::W, Video::H);
@@ -290,8 +298,7 @@ int main(int argc, char **argv) {
 #endif
           speed_measurement.rebase();
           if (video.win)
-            SDL_SetWindowTitle(video.win, paused ? "MobiGo 2 Emulator - Paused"
-                                                 : "MobiGo 2 Emulator");
+            SDL_SetWindowTitle(video.win, (session_title + (paused ? " - Paused" : "")).c_str());
         };
         auto reset_guest = [&]() {
           game_controller.release(bus);
@@ -332,7 +339,7 @@ int main(int argc, char **argv) {
               directory / ("mobigo2_" + std::to_string(stamp) + ".bmp");
           video.compose(bus, cpu);
           video.save_bmp(path);
-          SDL_SetWindowTitle(video.win, "MobiGo 2 Emulator - Screenshot saved");
+          SDL_SetWindowTitle(video.win, (session_title + " - Screenshot saved").c_str());
           std::cout << "Screenshot saved to " << path_to_utf8(path) << '\n';
         };
         const auto run_started = std::chrono::steady_clock::now();
@@ -395,8 +402,7 @@ int main(int argc, char **argv) {
                   audio.set_muted(muted);
                   update_host_audio_state();
                   SDL_SetWindowTitle(video.win,
-                                     muted ? "MobiGo 2 Emulator - Muted"
-                                           : "MobiGo 2 Emulator");
+                                     (session_title + (muted ? " - Muted" : "")).c_str());
                   continue;
                 case SDLK_F5:
                   reset_guest();

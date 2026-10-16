@@ -15,6 +15,11 @@ This creates `firmware/nand.bin`, verifies its size and
 hash, and leaves the numbered inputs unchanged. The assembled image is ignored
 by Git and must not be committed.
 
+The included `mobigo.bin` is the 8 MiB US MobiGo 1 external NOR BIOS/OS.
+CMake copies it into the executable's `firmware` directory automatically, and
+release packages include it for the **System (MobiGo 1)** launcher button.
+It is independent of the MobiGo 2 firmware set above.
+
 Official release archives already include the assembled `nand.bin`; no setup
 step is needed before double-clicking the packaged emulator.
 

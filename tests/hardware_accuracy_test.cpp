@@ -1,5 +1,6 @@
 #include "realtime_throttle.hpp"
 #include "video.hpp"
+#include "boot.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -628,7 +629,60 @@ static void test_centered_sprite_coordinates_clip_without_wrapping() {
             "off-screen centered sprite wrapped into the LCD bottom row");
 }
 
+static void test_mobigo1_external_rom_boot_and_chip_selects() {
+    Bus bus;
+    bus.board_rom.resize(0x100000, 0xffff);
+    bus.board_rom[0x2c] = 0x4567;
+    bus.board_rom[0x8000] = 0x1234;
+    bus.board_rom[0xfff7] = 0xf000;
+    bus.board_rom[0xf000] = 0xf165; // NOP at the reset entry
+    bus.board_rom[0x10000] = 0x2345;
+    bus.write(0x7820, 0x3f47);
+    bus.write(0x7821, 0x3f47);
+    bus.write(0x7822, 0xff87);
+    bus.write(0x7823, 0x3f86);
+    require(bus.read(0x8000) == 0x1234 && bus.read_code(0x8000) == 0x1234,
+            "MobiGo 1 low boot mirror is missing");
+    // Startup obtains the BIOS dispatch pointers from DS=2. This page
+    // precedes the MobiGo 2 SDRAM aperture and must not read as zero RAM.
+    require(bus.read(0x2002c) == 0x4567 && bus.dma_read(0x2002c) == 0x4567 &&
+                bus.read_code(0x2002c) == 0x4567,
+            "MobiGo 1 BIOS table page was routed to RAM");
+    require(bus.read(0x30000) == 0x2345 && bus.dma_read(0x30000) == 0x2345,
+            "MobiGo 1 CS0 ROM offset is incorrect");
+    bus.write(0x2002c, 0);
+    bus.dma_write(0x30000, 0);
+    require(bus.board_rom[0x2c] == 0x4567 && bus.board_rom[0x10000] == 0x2345,
+            "stores mutated MobiGo 1 NOR ROM");
+    bus.write(0x126d, 0xabcd);
+    require(bus.read(0x126d) == 0xabcd,
+            "MobiGo 1 ROM shadow replaced internal RAM");
+    // DMA uses physical addresses; CPU's upper window uses a bank register.
+    const uint32_t ram = bus.mcs_start(1);
+    bus.dma_write(ram, 0xbeef);
+    bus.write(0x7810, 2);
+    require(bus.read(0x220000) == 0xbeef && bus.dma_read(ram) == 0xbeef,
+            "MobiGo 1 banked CPU and DMA RAM mappings disagree");
+    const uint32_t empty = bus.mcs_start(2);
+    bus.dma_write(empty, 0x7777);
+    require(bus.dma_read(empty) == 0xffff && bus.dma_read(ram) == 0xbeef,
+            "unpopulated MobiGo 1 chip select aliased SDRAM");
+    bus.cart_mem = {0xcafe, 0x5678};
+    require(bus.dma_read(bus.mcs_start(3)) == 0xcafe,
+            "MobiGo 1 cartridge CS3 mapping is missing");
+    Cpu cpu(bus);
+    rom_boot(bus, cpu, 0, false);
+    require(cpu.lpc() == 0xf000, "MobiGo 1 reset vector is incorrect");
+    cpu.step();
+    require(cpu.lpc() == 0xf001, "MobiGo 1 reset instruction did not execute");
+    bus.system_reset(false);
+    rom_boot(bus, cpu, 0, false);
+    require(cpu.lpc() == 0xf000 && bus.read(0x2002c) == 0x4567,
+            "MobiGo 1 external ROM mapping was lost on reset");
+}
+
 int main() {
+    test_mobigo1_external_rom_boot_and_chip_selects();
     test_realtime_throttle_uses_live_hardware_clock();
     test_touch_frontend_calibration_orientation();
     test_mobigo2_accelerometer_i2c_and_motion_axes();

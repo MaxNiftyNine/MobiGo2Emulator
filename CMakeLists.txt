@@ -75,6 +75,16 @@ add_executable(mobigo2_emu
   src/ui_font.hpp
   src/video.hpp
 )
+# Keep the MobiGo 1 system ROM beside source-build executables as well as
+# in release packages, so the launcher works from any working directory.
+set_property(TARGET mobigo2_emu APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/firmware/mobigo.bin")
+add_custom_command(TARGET mobigo2_emu POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:mobigo2_emu>/firmware"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_SOURCE_DIR}/firmware/mobigo.bin"
+    "$<TARGET_FILE_DIR:mobigo2_emu>/firmware/mobigo.bin"
+  VERBATIM
+)
 if(WIN32)
   target_link_libraries(mobigo2_emu PRIVATE comdlg32)
   # Match the distributed Windows launcher: SDL owns WinMain and launching the

@@ -407,6 +407,7 @@ inline std::optional<MatrixKey> matrix_key_from_sdl(SDL_Keycode keycode) {
 }
 
 struct Options {
+    std::filesystem::path mobigo1_rom;
     std::filesystem::path rom = "internalrom.bin";
     std::filesystem::path cart;
     std::filesystem::path spi = "spi.bin";
@@ -490,7 +491,8 @@ inline Options parse_args(int argc, char **argv) {
         auto need_path = [&](const char *name) -> std::filesystem::path {
             return path_from_utf8(need(name));
         };
-        if (a == "--rom") opt.rom = need_path("--rom");
+        if (a == "--mobigo1-rom") opt.mobigo1_rom = need_path("--mobigo1-rom");
+        else if (a == "--rom") opt.rom = need_path("--rom");
         else if (a == "--cart") opt.cart = need_path("--cart");
         else if (a == "--spi") opt.spi = need_path("--spi");
         else if (a == "--nand") opt.nand = need_path("--nand");
@@ -639,6 +641,7 @@ With no options, open the desktop launcher. Passing any option uses the
 stable command-line interface.
 
 Images:
+  --mobigo1-rom PATH          Boot a MobiGo 1 external ROM (2 or 8 MiB, little endian)
   --rom PATH                 Internal ROM image
   --spi PATH                 SPI flash image
   --nand PATH                NAND image
@@ -756,6 +759,7 @@ inline void resolve_packaged_firmware(Options &opt, const char *argv0) {
             }
         }
     };
+    resolve(opt.mobigo1_rom);
     resolve(opt.rom);
     resolve(opt.spi);
     resolve(opt.nand);

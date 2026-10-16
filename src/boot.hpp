@@ -41,12 +41,18 @@ inline void spi_boot(Bus &bus, Cpu &cpu) {
 }
 
 inline void rom_boot(Bus &bus, Cpu &cpu, uint32_t start_pc, bool start_pc_set) {
-    if (bus.internal_rom.empty()) die("ROM boot requested but no internal ROM was loaded");
+    if (bus.internal_rom.empty() && bus.board_rom.empty()) die("ROM boot requested but no internal ROM was loaded");
 
     const uint32_t start = start_pc_set ? start_pc : uint32_t(bus.read(0x00fff7));
     cpu.reset_core(start);
 
     if (g_log) {
+        if (!bus.board_rom.empty()) {
+            g_log << "MobiGo 1 external ROM boot: words=0x" << std::hex
+                  << bus.board_rom.size() << " reset_vector=0x" << bus.read(0x00fff7)
+                  << " start=0x" << start << std::dec << "\n";
+            return;
+        }
         g_log << "ROM boot: rom_base=0x" << std::hex << bus.internal_rom_base
               << " words=0x" << bus.internal_rom.size()
               << " reset_vector=0x" << bus.read(0x00fff7)

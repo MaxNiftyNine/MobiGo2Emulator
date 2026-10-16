@@ -41,7 +41,7 @@ jobs:
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/firmware"
           cp build/pgo/mobigo2_emu "$APP/Contents/MacOS/MobiGo2Emulator"
           cp packaging/Info.plist "$APP/Contents/Info.plist"
-          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin "$APP/Contents/Resources/firmware/"
+          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin firmware/mobigo.bin "$APP/Contents/Resources/firmware/"
           SDL="$(otool -L build/pgo/mobigo2_emu | awk '/libSDL2/{print $1; exit}')"
           SDL_NAME="$(basename "$SDL")"
           cp -L "$SDL" "$APP/Contents/Frameworks/$SDL_NAME"
@@ -122,7 +122,7 @@ jobs:
           cp "$(ldconfig -p | awk '/libSDL2-2.0.so.0/{print $NF; exit}')" "$ROOT/lib/"
           cp "$(ldconfig -p | awk '/libSDL2_ttf-2.0.so.0/{print $NF; exit}')" "$ROOT/lib/"
           patchelf --set-rpath '$ORIGIN/lib' "$ROOT/MobiGo2Emulator"
-          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin "$ROOT/firmware/"
+          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin firmware/mobigo.bin "$ROOT/firmware/"
           cp README.md LICENSE "$ROOT/"
           tar -czf MobiGo2Emulator-Ubuntu24.04-${{ matrix.architecture }}.tar.gz -C dist MobiGo2Emulator
       - uses: actions/upload-artifact@v4
@@ -171,7 +171,7 @@ jobs:
           while IFS= read -r dll; do
             cp "$dll" dist/MobiGo2Emulator/
           done
-          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin dist/MobiGo2Emulator/firmware/
+          cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin firmware/mobigo.bin dist/MobiGo2Emulator/firmware/
           cp README.md LICENSE dist/MobiGo2Emulator/
       - name: Smoke-test packaged executable without MSYS2 on PATH
         shell: pwsh
