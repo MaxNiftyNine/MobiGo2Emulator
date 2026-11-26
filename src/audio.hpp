@@ -180,6 +180,14 @@ struct Audio {
                phase_reg(bus, channel, 4);
     }
 
+    static uint16_t read_spu_word(Bus &bus, uint32_t address) {
+        // All 32 voices share the SPU's external-memory bank. Attribute
+        // pointers contain only its low 22 bits; the CPU bank at 0x7810 is
+        // independent. Cartridge sound drivers select bank 4 at 0x7b9f.
+        const uint32_t bank = uint32_t(spu_ctrl(bus, 0, 0x1f)) << 22;
+        return bus.dma_read(bank | (address & kAddrMask));
+    }
+
     static void store_wave_address(Bus &bus, unsigned channel, uint32_t address) {
         uint16_t &mode = channel_reg(bus, channel, 1);
         mode = uint16_t((mode & ~uint16_t(0x003f)) | ((address >> 16) & 0x003f));
@@ -362,7 +370,7 @@ struct Audio {
             const bool adpcm36 = compressed &&
                 (channel_reg(bus, index, 0x0d) & 0x8000) != 0;
             if (adpcm36 && state.adpcm36_remaining == 0) {
-                state.adpcm36_header = bus.dma_read(state.wave_addr & kAddrMask);
+                state.adpcm36_header = read_spu_word(bus, state.wave_addr);
                 if (state.adpcm36_header == 0xffff) {
                     if (!handle_end_marker(bus, index, tone_mode)) return false;
                     continue;
@@ -373,7 +381,7 @@ struct Audio {
                     uint8_t(((state.adpcm36_header >> 9) & 0x1f) + 1);
             }
 
-            const uint16_t raw = bus.dma_read(state.wave_addr & kAddrMask);
+            const uint16_t raw = read_spu_word(bus, state.wave_addr);
             const bool pcm8 = !compressed && (mode & 0x4000) == 0;
             const bool end_marker = pcm8
                 ? uint8_t(raw >> state.sample_shift) == 0xff
@@ -462,13 +470,13 @@ struct Audio {
                 if (repeats) --repeats;
                 env1 = uint16_t((env1 & 0x01ff) | (repeats << 9));
                 if (repeats == 0) {
-                    channel_reg(bus, index, 4) = bus.dma_read(channels[index].envelope_addr++);
-                    channel_reg(bus, index, 6) = bus.dma_read(channels[index].envelope_addr++);
-                    channel_reg(bus, index, 0x0a) = bus.dma_read(channels[index].envelope_addr++);
+                    channel_reg(bus, index, 4) = read_spu_word(bus, channels[index].envelope_addr++);
+                    channel_reg(bus, index, 6) = read_spu_word(bus, channels[index].envelope_addr++);
+                    channel_reg(bus, index, 0x0a) = read_spu_word(bus, channels[index].envelope_addr++);
                 }
             } else {
-                channel_reg(bus, index, 4) = bus.dma_read(channels[index].envelope_addr++);
-                channel_reg(bus, index, 6) = bus.dma_read(channels[index].envelope_addr++);
+                channel_reg(bus, index, 4) = read_spu_word(bus, channels[index].envelope_addr++);
+                channel_reg(bus, index, 6) = read_spu_word(bus, channels[index].envelope_addr++);
             }
             env1 = channel_reg(bus, index, 6);
         }

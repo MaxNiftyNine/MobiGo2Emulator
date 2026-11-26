@@ -348,6 +348,113 @@ static void test_spu_adpcm36_prediction_against_vendor_decoder() {
     }
 }
 
+static void configure_cartridge_audio_bus(Bus &bus) {
+    // Place CS3 at physical word 0xc00000, with a mirrored synthetic ROM.
+    bus.write(0x7820, 0x0044);
+    bus.write(0x7821, 0x7c47);
+    bus.write(0x7822, 0x3fc4);
+    bus.write(0x7823, 0xff87);
+    assert(bus.mcs_start(3) == 0xc00000);
+    bus.cart_mem.assign(0x1000, 0xffff);
+    bus.write(0x7b9f, 4);
+    bus.write(0x7bbf, 7); // The upper voice group has no separate wave bank.
+    bus.write(0x7810, 2); // CPU banking must not affect the SPU.
+}
+
+static void configure_banked_voice(Bus &bus, Audio &audio, unsigned channel,
+                                    uint16_t wave, uint16_t mode,
+                                    uint16_t loop, uint16_t format = 0) {
+    Audio::channel_reg(bus, channel, 0) = wave;
+    Audio::channel_reg(bus, channel, 1) = uint16_t(mode | 0x0f3c);
+    Audio::channel_reg(bus, channel, 2) = loop;
+    Audio::channel_reg(bus, channel, 13) = format;
+    audio.start_channel(bus, channel);
+}
+
+static void test_spu_cartridge_bank_waveforms_and_sustain() {
+    for (const unsigned channel : {0u, 17u}) {
+        Bus bus;
+        Audio audio;
+        configure_cartridge_audio_bus(bus);
+        // Poison the corresponding unbanked RAM so missing bank bits cannot
+        // accidentally produce the expected samples or terminators.
+        for (unsigned i = 0x100; i < 0x410; ++i)
+            bus.dma_write(0x3c0000 + i, 0xffff);
+
+        bus.cart_mem[0x100] = 0x9000;
+        bus.cart_mem[0x101] = 0xa000;
+        configure_banked_voice(bus, audio, channel, 0x100, 0x7000, 0x100);
+        for (const uint16_t sample : {0x9000, 0xa000, 0x9000}) {
+            assert(audio.fetch_sample(bus, channel));
+            assert(audio.channels[channel].current == sample);
+        }
+        bus.write(0x7810, 9);
+        assert(audio.fetch_sample(bus, channel));
+        assert(audio.channels[channel].current == 0xa000);
+
+        bus.cart_mem[0x200] = 0x9080;
+        bus.cart_mem[0x201] = 0xffa0;
+        configure_banked_voice(bus, audio, channel, 0x200, 0x3000, 0x200);
+        for (const uint16_t sample : {0x8080, 0x9090, 0xa0a0, 0x8080}) {
+            assert(audio.fetch_sample(bus, channel));
+            assert(audio.channels[channel].current == sample);
+        }
+
+        bus.cart_mem[0x300] = 0x8404; // Three ADPCM36 residuals.
+        bus.cart_mem[0x301] = 0xf321;
+        bus.cart_mem[0x304] = 0x9200;
+        bus.cart_mem[0x305] = 0x9300;
+        configure_banked_voice(bus, audio, channel, 0x300, 0xf000, 0x304, 0xbe00);
+        for (const uint16_t sample : {0x8100,0x8200,0x8300,0x9200,0x9300,0x9200}) {
+            assert(audio.fetch_sample(bus, channel));
+            assert(audio.channels[channel].current == sample);
+        }
+        assert((Audio::channel_reg(bus, channel, 1) & 0x8000) == 0);
+
+        bus.cart_mem[0x400] = 0x1111;
+        bus.cart_mem[0x402] = 0x9800;
+        configure_banked_voice(bus, audio, channel, 0x400, 0xf000, 0x402);
+        Audio::ImaState reference;
+        for (unsigned n = 0; n < 4; ++n) {
+            assert(audio.fetch_sample(bus, channel));
+            assert(audio.channels[channel].current ==
+                   Audio::unsigned_sample(reference.clock(1)));
+        }
+        assert(audio.fetch_sample(bus, channel));
+        assert(audio.channels[channel].current == 0x9800);
+
+        // Changing the shared bank affects subsequent reads immediately.
+        bus.write(0x7b9f, 0);
+        bus.dma_write(0x3c0100, 0xb000);
+        configure_banked_voice(bus, audio, channel, 0x100, 0x7000, 0x100);
+        assert(audio.fetch_sample(bus, channel));
+        assert(audio.channels[channel].current == 0xb000);
+    }
+}
+
+static void test_spu_cartridge_bank_envelope_tables() {
+    for (const unsigned channel : {0u, 17u}) {
+        Bus bus;
+        Audio audio;
+        configure_cartridge_audio_bus(bus);
+        constexpr uint32_t base = 0x3c0500;
+        bus.dma_write(base, 0xdead);
+        bus.dma_write(base + 1, 0xbeef);
+        bus.cart_mem[0x500] = 0x2010;
+        bus.cart_mem[0x501] = 0x0002;
+        Audio::channel_reg(bus, channel, 4) = 0x1001;
+        Audio::channel_reg(bus, channel, 5) = 15;
+        Audio::channel_reg(bus, channel, 7) = 0x3c;
+        Audio::channel_reg(bus, channel, 8) = 0x500;
+        audio.start_channel(bus, channel);
+        audio.envelope_tick(bus, channel);
+        assert(Audio::channel_reg(bus, channel, 4) == 0x2010);
+        assert(Audio::channel_reg(bus, channel, 6) == 2);
+        assert(Audio::channel_reg(bus, channel, 5) == 0x0210);
+        assert(audio.channels[channel].envelope_addr == base + 2);
+    }
+}
+
 static void configure_constant_voice(Bus &bus, Audio &audio, unsigned channel,
                                      int16_t sample) {
     Audio::channel_reg(bus, channel, 3) = 127; // Full-left pan, volume 127.
@@ -516,6 +623,8 @@ int main() {
     test_spu_compressed_attack_enters_pcm_sustain();
     test_spu_adpcm36_variable_blocks_and_termination();
     test_spu_adpcm36_prediction_against_vendor_decoder();
+    test_spu_cartridge_bank_waveforms_and_sustain();
+    test_spu_cartridge_bank_envelope_tables();
     test_spu_hardware_gain_steps();
     test_spu_saturation_control();
     test_spu_envelope_preserves_half_tick();

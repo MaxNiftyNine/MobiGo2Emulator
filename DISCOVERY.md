@@ -885,3 +885,51 @@ assembled NAND is `firmware/nand.bin`.
   frame structure, but real-console rounding, analog output, compressor,
   pitch bend and the complete music mix have not yet been compared against a
   matching hardware gameplay recording.
+
+## Scooby-Doo: Mystery Town cartridge audio, 2026-11-26
+
+- **Input** — The supplied UK 16 MiB cartridge has SHA-256
+  `45f4f88989603dad468fc30d9d1b57b0960caad23c05eecbe96eee7f48ea5339`.
+  The unmodified cartridge advances through Guest selection, its animated
+  introduction, the activity menu, and Franken Castle's tutorial/gameplay in
+  the baseline investigation. The corrected, packaged Mac app also reaches
+  Pirate's Cove gameplay through 3.4 billion instructions without a crash or
+  artificial watchdog reset. This is partial gameplay coverage, not completion of every
+  activity or verification against a physical-console recording.
+- **Verified addressing fault** — Its sound driver writes `4` to `0x7b9f`
+  at CPU PC `0x2676b7`, selecting the shared SPU external-memory bank. CS3
+  starts at physical word `0xc00000`. Therefore a channel pointer `A` must
+  read physical word `(4 << 22) | A`, which maps to cartridge word
+  `0x400000 + A`. The old mixer sent the low 22-bit pointer directly to DMA
+  and read unrelated SDRAM. This affects speech, percussion, instrument
+  attacks, PCM sustain loops, and automatic envelope data.
+- **Concrete cross-check** — The first cartridge speech pointer `0x388356`
+  reads `0x0000` from the incorrect RAM location. Its cartridge location begins
+  with the valid ADPCM36 header `0xbe6b` and parses through 825 blocks /
+  26,369 samples to its end marker. Instrument `0x3db48a` has 2,621 attack
+  samples ending at `0x3db76c`, followed by the PCM sustain at `0x3db76d`.
+  Its envelope at `0x3ddbb5` contains `6464 0000 6400 00ff`, rather than the
+  zeros or compressed waveform words found through the old RAM reads.
+- **Correction** — All SPU waveform and envelope fetches now combine the
+  channel's low 22-bit address with the shared bank at `0x7b9f` before using
+  the flat external-memory bus. This bank serves both 16-voice groups and is
+  independent of the CPU bank at `0x7810`. The same mapping is independently
+  described in
+  [MobiGoEmu's GPL16250 audio research](https://github.com/vs-sr-dev/mobigoemu/blob/3a284798636a378e619f3828bcf4e61b16c76ae9/src/gpl16250_audio.c).
+  No title-specific addresses or cartridge bytes are embedded in the fix.
+- **Independent codec verification** — Fifty distinct cartridge audio samples,
+  comprising 20,037 compressed frames / 640,385 decoded points, match the
+  archived Generalplus decoder exactly, preserving predictor history across
+  frames. The instrument and speech frame structure therefore supports the
+  bank mapping independently of the unofficial SDK.
+- **Regression coverage** — Synthetic tests poison unbanked RAM and use a
+  separate mirrored cartridge image to verify PCM8/PCM16, IMA, ADPCM36,
+  terminators, compressed-to-PCM sustain transitions, envelope tables, both
+  voice groups, and independence from CPU banking. All six normal and all six
+  ASan/UBSan tests pass. The existing 750-million-instruction Hamster Highway
+  recording remains byte-for-byte identical with the new bank-zero path.
+- **Remaining boundary** — There is no matching physical Scooby-Doo recording.
+  The trace also shows three re-enables with pointers inside existing
+  compressed blocks; exact hardware decoder-state preservation during these
+  enable transitions remains unverified. This correction establishes the
+  sample/envelope memory source, not every analog, compressor or restart edge.
