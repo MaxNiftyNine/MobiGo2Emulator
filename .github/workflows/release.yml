@@ -149,8 +149,9 @@ jobs:
             mingw-w64-x86_64-compiler-rt
             mingw-w64-x86_64-llvm
             mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-sdl2-compat
             mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-sdl3
             mingw-w64-x86_64-python
       - shell: msys2 {0}
         run: |
@@ -161,8 +162,13 @@ jobs:
           ctest --test-dir build --output-on-failure
           mkdir -p dist/MobiGo2Emulator/firmware
           cp build/mobigo2_emu.exe dist/MobiGo2Emulator/MobiGo2Emulator.exe
+          # SDL2-compat loads SDL3.dll at runtime, so ldd on the EXE misses it.
+          sdl3="$MINGW_PREFIX/bin/SDL3.dll"
+          cp "$sdl3" dist/MobiGo2Emulator/
           dependencies=$(mktemp)
-          ldd build/mobigo2_emu.exe | tee "$dependencies"
+          ldd build/mobigo2_emu.exe > "$dependencies"
+          ldd "$sdl3" >> "$dependencies"
+          cat "$dependencies"
           if grep -qi 'not found' "$dependencies"; then
             echo 'Unresolved Windows runtime dependency' >&2
             exit 1
@@ -173,16 +179,33 @@ jobs:
           done
           cp firmware/internalrom.bin firmware/spi.bin firmware/nand.bin firmware/mobigo.bin dist/MobiGo2Emulator/firmware/
           cp README.md LICENSE dist/MobiGo2Emulator/
-      - name: Smoke-test packaged executable without MSYS2 on PATH
-        shell: pwsh
-        run: |
-          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
-          Push-Location dist/MobiGo2Emulator
-          & .\MobiGo2Emulator.exe --no-cap --no-window --steps 1
-          if (-not $?) { throw "Packaged emulator failed" }
-          Pop-Location
       - shell: pwsh
         run: Compress-Archive -Path dist/MobiGo2Emulator -DestinationPath MobiGo2Emulator-Windows-x86_64.zip
+      - name: Smoke-test Windows ZIP with video and audio enabled
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'mobigo2-smoke'
+          Expand-Archive -Path MobiGo2Emulator-Windows-x86_64.zip -DestinationPath $destination
+          $package = Join-Path $destination 'MobiGo2Emulator'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:SDL_VIDEODRIVER = 'dummy'
+          $env:SDL_AUDIODRIVER = 'dummy'
+          $stdout = Join-Path $env:RUNNER_TEMP 'mobigo2-smoke.stdout.txt'
+          $stderr = Join-Path $env:RUNNER_TEMP 'mobigo2-smoke.stderr.txt'
+          $process = Start-Process -FilePath (Join-Path $package 'MobiGo2Emulator.exe') `
+            -WorkingDirectory $package -ArgumentList '--no-cap --audio --steps 1' `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'Packaged emulator did not exit within 30 seconds'
+          }
+          Get-Content $stdout, $stderr
+          if ($process.ExitCode -ne 0 -or -not (Select-String -Path $stdout -SimpleMatch 'Stopped after 1 instructions' -Quiet)) {
+            throw "Packaged emulator failed with exit code $($process.ExitCode)"
+          }
+          if (Select-String -Path $stderr -SimpleMatch 'SDL audio unavailable', 'failed to open audio device' -Quiet) {
+            throw 'Packaged emulator failed to initialize audio'
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: MobiGo2Emulator-Windows-x86_64
