@@ -13,7 +13,6 @@ struct Audio {
     static constexpr size_t kHostQueueFrames = 256;
     static constexpr Uint32 kHostFrameBytes = 2 * sizeof(int16_t);
     static constexpr uint64_t kSpuServiceRate = 281250;
-    static constexpr uint64_t kSpuOutputRate = kSpuServiceRate / 4;
     static constexpr uint64_t kPhaseScale = 1u << 19;
 
     struct ImaState {
@@ -89,7 +88,8 @@ struct Audio {
         uint32_t active = 0;
         uint64_t rate_denominator = 0;
         bool interpolate = false;
-        unsigned volume_shift = 0;
+        int volume_shift = 0;
+        bool saturate = false;
         int32_t main_volume = 0;
         std::array<uint64_t, 32> rate_step{};
         std::array<int32_t, 32> left_gain{};
@@ -297,12 +297,25 @@ struct Audio {
     }
 
     uint16_t decode_adpcm36(Channel &state, uint8_t nibble) {
+        // ADPCM36 prediction coefficients in 1/64 units, checked against
+        // Generalplus's A3600 decoder (2004 codec, distributed in 2008).
+        // Filter selection is five bits; bit 9 belongs to the point count.
+        static constexpr std::array<std::array<int, 2>, 32> filters{{
+            {0,0}, {60,0}, {115,-52}, {98,-55}, {122,-60}, {127,-64},
+            {64,0}, {-64,0}, {-75,-36}, {63,-6}, {6,19}, {54,-12},
+            {-24,-32}, {73,-21}, {-42,-15}, {65,-3}, {23,-7}, {75,-14},
+            {10,-30}, {85,-34}, {65,-33}, {97,-47}, {-9,-12}, {86,-26},
+            {39,15}, {79,-47}, {41,-27}, {98,-38}, {38,-50}, {111,-52},
+            {0,0}, {0,0}
+        }};
         const int shift = state.adpcm36_header & 0x0f;
-        int filter = (state.adpcm36_header >> 4) & 0x3f;
-        if (filter & 0x20) filter -= 0x40;
+        const auto &filter = filters[(state.adpcm36_header >> 4) & 0x1f];
         const int16_t signed_nibble = int16_t(nibble << 12);
+        // The reference truncates each prediction product toward zero
+        // separately, rather than rounding their sum or shifting negatives.
         int sample = (signed_nibble >> shift) +
-                     ((state.adpcm36_previous[0] * filter + 32) >> 12);
+                     state.adpcm36_previous[0] * filter[0] / 64 +
+                     state.adpcm36_previous[1] * filter[1] / 64;
         sample = std::clamp(sample, -32768, 32767);
         state.adpcm36_previous[1] = state.adpcm36_previous[0];
         state.adpcm36_previous[0] = int16_t(sample);
@@ -322,6 +335,10 @@ struct Audio {
         channels[index].wave_addr = target;
         channels[index].sample_shift = 0;
         channels[index].adpcm36_remaining = 0;
+        // Instrument attacks are compressed, but their sustain loops are
+        // PCM. ADPCM_SEL remains programmed and only selects a codec while
+        // the mode's ADPCM enable bit is set.
+        channel_reg(bus, index, 1) &= uint16_t(~0x8000);
         store_wave_address(bus, index, channels[index].wave_addr);
         return true;
     }
@@ -338,42 +355,61 @@ struct Audio {
             return true;
         }
 
-        const bool adpcm36 = (channel_reg(bus, index, 0x0d) & 0x8000) != 0;
-        if (adpcm36 && state.adpcm36_remaining == 0) {
-            state.adpcm36_header = bus.dma_read(state.wave_addr & kAddrMask);
-            ++state.wave_addr;
-            state.adpcm36_remaining = 8;
-        }
-
-        const uint16_t raw = bus.dma_read(state.wave_addr & kAddrMask);
-        if (raw == 0xffff && state.sample_shift == 0) {
-            return handle_end_marker(bus, index, tone_mode);
-        }
-
-        if ((mode & 0x8000) || adpcm36) {
-            const uint8_t nibble = uint8_t((raw >> state.sample_shift) & 0x0f);
-            state.current = adpcm36 ? decode_adpcm36(state, nibble)
-                                    : unsigned_sample(state.ima.clock(nibble));
-            state.sample_shift += 4;
-            if (state.sample_shift == 16) {
-                state.sample_shift = 0;
+        // End markers redirect the fetch bus. They do not consume a source
+        // sample period. One retry also bounds an empty/self-pointing loop.
+        for (unsigned attempt = 0; attempt < 2; ++attempt) {
+            const bool compressed = (mode & 0x8000) != 0;
+            const bool adpcm36 = compressed &&
+                (channel_reg(bus, index, 0x0d) & 0x8000) != 0;
+            if (adpcm36 && state.adpcm36_remaining == 0) {
+                state.adpcm36_header = bus.dma_read(state.wave_addr & kAddrMask);
+                if (state.adpcm36_header == 0xffff) {
+                    if (!handle_end_marker(bus, index, tone_mode)) return false;
+                    continue;
+                }
                 ++state.wave_addr;
-                if (adpcm36 && state.adpcm36_remaining) --state.adpcm36_remaining;
+                state.sample_shift = 0;
+                state.adpcm36_remaining =
+                    uint8_t(((state.adpcm36_header >> 9) & 0x1f) + 1);
             }
-        } else if (mode & 0x4000) {
-            state.current = raw;
-            ++state.wave_addr;
-        } else {
-            const uint8_t byte = uint8_t(raw >> state.sample_shift);
-            state.current = uint16_t(byte) * 0x0101;
-            state.sample_shift ^= 8;
-            if (state.sample_shift == 0) ++state.wave_addr;
-        }
 
-        channel_reg(bus, index, 9) = state.previous;
-        channel_reg(bus, index, 0x0b) = state.current;
-        store_wave_address(bus, index, state.wave_addr);
-        return true;
+            const uint16_t raw = bus.dma_read(state.wave_addr & kAddrMask);
+            const bool pcm8 = !compressed && (mode & 0x4000) == 0;
+            const bool end_marker = pcm8
+                ? uint8_t(raw >> state.sample_shift) == 0xff
+                : !adpcm36 && raw == 0xffff && state.sample_shift == 0;
+            if (end_marker) {
+                if (!handle_end_marker(bus, index, tone_mode)) return false;
+                continue;
+            }
+
+            if (compressed) {
+                const uint8_t nibble = uint8_t((raw >> state.sample_shift) & 0x0f);
+                state.current = adpcm36 ? decode_adpcm36(state, nibble)
+                                        : unsigned_sample(state.ima.clock(nibble));
+                state.sample_shift += 4;
+                if (adpcm36) --state.adpcm36_remaining;
+                if (state.sample_shift == 16 ||
+                    (adpcm36 && state.adpcm36_remaining == 0)) {
+                    state.sample_shift = 0;
+                    ++state.wave_addr;
+                }
+            } else if (mode & 0x4000) {
+                state.current = raw;
+                ++state.wave_addr;
+            } else {
+                const uint8_t byte = uint8_t(raw >> state.sample_shift);
+                state.current = uint16_t(byte) * 0x0101;
+                state.sample_shift ^= 8;
+                if (state.sample_shift == 0) ++state.wave_addr;
+            }
+
+            channel_reg(bus, index, 9) = state.previous;
+            channel_reg(bus, index, 0x0b) = state.current;
+            store_wave_address(bus, index, state.wave_addr);
+            return true;
+        }
+        return false;
     }
 
     static uint32_t envelope_frame_count(Bus &bus, unsigned index) {
@@ -442,9 +478,10 @@ struct Audio {
 
     void service_envelope(Bus &bus, unsigned index) {
         Channel &state = channels[index];
-        state.service_accum += kSpuOutputRate;
-        while (state.service_accum >= rate()) {
-            state.service_accum -= rate();
+        state.service_accum += kSpuServiceRate;
+        const uint64_t denominator = uint64_t(rate()) * 4;
+        while (state.service_accum >= denominator) {
+            state.service_accum -= denominator;
             if (channel_bit(bus, index, 0x0a)) {
                 if (state.rampdown_frames) --state.rampdown_frames;
                 if (state.rampdown_frames == 0) {
@@ -475,8 +512,12 @@ struct Audio {
         cache.rate_denominator = uint64_t(rate()) * kPhaseScale;
         const uint16_t control = spu_ctrl(bus, 0, 0x0d);
         cache.interpolate = (control & 0x0200) == 0;
-        static constexpr std::array<unsigned, 4> volume_shifts{5, 3, 2, 0};
+        // VOLSEL selects x1/16, x1/4, x1 and x2. Hardware captures confirm
+        // the x4 and x2 steps between the upper settings. Negative shifts
+        // represent multiplication without left-shifting signed samples.
+        static constexpr std::array<int, 4> volume_shifts{4, 2, 0, -1};
         cache.volume_shift = volume_shifts[(control >> 6) & 3];
+        cache.saturate = (control & 0x8000) != 0;
         cache.main_volume = spu_ctrl(bus, 0, 0x01) & 0x7f;
 
         uint32_t remaining = cache.active;
@@ -530,12 +571,25 @@ struct Audio {
         const uint16_t wave_in_right = spu_ctrl(bus, 0, 0x11);
         if (wave_in_left) left += int16_t(wave_in_left ^ 0x8000);
         if (wave_in_right) right += int16_t(wave_in_right ^ 0x8000);
-        left >>= cache.volume_shift;
-        right >>= cache.volume_shift;
+        if (cache.volume_shift >= 0) {
+            left >>= cache.volume_shift;
+            right >>= cache.volume_shift;
+        } else {
+            left *= 2;
+            right *= 2;
+        }
         left = (left * cache.main_volume) >> 7;
         right = (right * cache.main_volume) >> 7;
-        spu_ctrl(bus, 0, 0x12) = uint16_t(int16_t(std::clamp(left, -32768, 32767)));
-        spu_ctrl(bus, 0, 0x13) = uint16_t(int16_t(std::clamp(right, -32768, 32767)));
+        if (cache.saturate) {
+            left = std::clamp(left, -32768, 32767);
+            right = std::clamp(right, -32768, 32767);
+        }
+        // The mixer exposes the same signed 16-bit result to its output
+        // registers and the DAC, including wraparound when SATURATE is off.
+        left = int16_t(uint16_t(left));
+        right = int16_t(uint16_t(right));
+        spu_ctrl(bus, 0, 0x12) = uint16_t(left);
+        spu_ctrl(bus, 0, 0x13) = uint16_t(right);
         return {left, right};
     }
 

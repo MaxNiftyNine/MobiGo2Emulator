@@ -26,6 +26,26 @@ static void test_mba_handoff_arms_watchdog_at_entry() {
     require(!bus.mba_watchdog_handoff_pending, "MBA watchdog armed more than once");
 }
 
+static void test_normal_mba_handoff_preserves_firmware_watchdog() {
+    for (const uint16_t control : {0x0000, 0x8003}) {
+        Bus bus;
+        constexpr uint32_t entry = 0x0e1a55;
+        bus.cycles = 1000;
+        bus.write(0x780a, control);
+        const uint64_t deadline = bus.watchdog_expire_cycles;
+        bus.configure_mba_application_target(entry, false);
+        bus.maybe_begin_mba_application(entry, 0x6ffd);
+        bus.maybe_arm_mba_watchdog_handoff(entry, 0x6ffd);
+        require(bus.mba_launch_count == 1, "normal MBA handoff was not observed");
+        require(bus.mmio[0x780a - kMmioBase] == control,
+                "normal MBA handoff changed the firmware watchdog control");
+        require(bus.watchdog_enabled == bool(control & 0x8000),
+                "normal MBA handoff changed watchdog enable state");
+        require(bus.watchdog_expire_cycles == deadline,
+                "normal MBA handoff changed the firmware watchdog deadline");
+    }
+}
+
 static void test_program_can_feed_then_disable_handoff_watchdog() {
     Bus bus;
     bus.configure_mba_watchdog_handoff(0x0e1a55);
@@ -87,6 +107,7 @@ static void test_unserviced_handoff_watchdog_resets_system() {
 }
 
 int main() {
+    test_normal_mba_handoff_preserves_firmware_watchdog();
     test_mba_handoff_arms_watchdog_at_entry();
     test_program_can_feed_then_disable_handoff_watchdog();
     test_fixed_mba_entry_stub_disables_inherited_watchdog();

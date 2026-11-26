@@ -3557,9 +3557,10 @@ struct Bus {
                         // The short watchdog armed solely for the substituted
                         // MBA must not leak into the normally loaded title.
                         mba_application_entry_pinned = false;
+                        if (mba_watchdog_entry != UINT32_MAX)
+                            write(0x780a, 0x0000);
                         mba_watchdog_entry = UINT32_MAX;
                         mba_watchdog_handoff_pending = false;
-                        write(0x780a, 0x0000);
                         observe_mba_application_entry(entry);
                         if (g_log) {
                             g_log << "MBA selected target released for follow-up entry=0x"

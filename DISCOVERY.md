@@ -787,3 +787,101 @@ assembled NAND is `firmware/nand.bin`.
   gameplay, and other regional revisions. The Spanish dump was excluded from
   this task's compatibility target at the user's request; its integrity is
   not established. No guest code or firmware files were patched.
+
+## Physical audio probe comparison, 2026-11-26
+
+- **Verified against a recording** — `40tests.wav`, SHA-256
+  `add0543dea0ccf236d71092be998ba786a3b2879c58dd4380d24816f82d5fe15`,
+  contains 260.119 seconds of mono 44.1 kHz PCM from the physical console.
+  The matching mono-v2 probe MBA has SHA-256
+  `77290a63881e9c7a71d8ff2b2a89d4cc67beff36b69c0e76461ca61fc1b9acee`.
+  The take covers 39 complete single-voice/configuration tests, the two-voice
+  mix, and part of the four-voice mix. Original recordings remain local.
+- **Verified** — The 128-sample PCM loops play at their programmed rate divided
+  by 128. The old mixer used 129 periods because it held the previous value
+  while processing the end marker. Fetching the first loop sample immediately
+  reduces median pitch error across the sixteen PCM8/PCM16 rate probes from
+  13.47 cents to 0.034 cents in an isolated rendering of the same raw settings.
+  This general fetch correction also applies to compressed-to-PCM transitions. Empty loops
+  remain bounded. PCM8 termination is checked per byte rather than per word.
+- **Verified upper gain steps, emulator-inferred absolute scale** — Relative
+  to VOLSEL=2, the physical capture's fundamental measures -13.29 dB at
+  VOLSEL=1 and +6.32 dB at VOLSEL=3. The former mapping predicted -6.02 dB
+  and +12.04 dB. The corrected mapping predicts -12.04 dB and +6.02 dB.
+  VOLSEL=0 is below the usable signal floor in this capture. The full mapping
+  x1/16, x1/4, x1, x2 follows related Sunplus hardware definitions. Absolute
+  output level also depends on the recording gain and analog path.
+- **Emulator-inferred** — The SPU saturation control selects clipping or
+  signed 16-bit wrapping at the mixer output. Output registers and DAC input
+  now receive the same result. The reference for the control bit, VOLSEL
+  definitions and PCM8 byte termination is the related-chip implementation in
+  [MAME's SPG2xx audio device](https://github.com/mamedev/mame/blob/d0f1c15a0f6df2dd51a754cb46e6175b7079c8f2/src/devices/machine/spg2xx_audio.cpp).
+  Saturation/overflow was not independently measured in the captured prefix.
+- The envelope service clock now retains the exact 281250/4 fraction rather
+  than truncating it to 70312 Hz. Synthetic regressions cover fractional ticks,
+  loop periods, PCM8 terminators, compressed-to-PCM transitions, gain steps,
+  both signs of mixer overflow, and saturation.
+- **Unknown** — The physical capture has strong even harmonics, low-frequency
+  attenuation and switching transients. The console's analog path and the
+  recording input have not been isolated. These features do not establish a
+  global nonlinear digital-mixer rule. The probe's elapsed stage timing also
+  differs from the emulator. This capture alone cannot identify the clock or
+  polling behavior responsible. Compressed-codec accuracy and high-polyphony
+  overflow remain outside the confirmed coverage of this recording.
+
+## Hamster Highway music investigation, 2026-11-26
+
+- **Verified from the game's data** — The built-in G1 MBA (SHA-256
+  `2b7a85324a29c5feed346342455f5cd87264656ebd9fd66295e0e144d343ca73`)
+  uses ADPCM36 instrument attacks and percussion. Seven observed samples
+  parse exactly to their `0xffff` terminators when each header's bits 13..9
+  specify sample count minus one. Every sample has a partial final block.
+  The former fixed 32-sample interpretation decoded padding and subsequent
+  resources as audio. A residual word of `0xffff` is valid inside a block;
+  only the header position terminates ADPCM36.
+- **Verified from the instrument and independent research** — The attack at
+  wave address `0x3f52de` contains 269 compressed samples, then its terminator
+  and a 35-sample unsigned PCM16 sustain loop. The mode's ADPCM bit must clear
+  at the loop transition, while ADPCM_SEL remains programmed. The former
+  model continued interpreting the PCM sustain as compressed frames. This
+  corrupts both the waveform and its period. This format and transition were
+  independently described by
+  [Samuele Voltan's MobiGo research](https://github.com/vs-sr-dev/mobigoemu/blob/3a284798636a378e619f3828bcf4e61b16c76ae9/docs/RECON.md#ADPCM36-the-format).
+  In an isolated rendering at the game's pitch `0x5900`, the corrected loop's
+  dominant harmonic measures 1047.624859 Hz, matching the PCM data's expected
+  1047.624860 Hz. The former rendering's strongest component was 488.891602 Hz.
+  This is a comparison to the stored waveform, not a hardware recording.
+- **Verified against a vendor software decoder** — Located Generalplus
+  `A3600.ac` in `talkingbook/acm/trunk/audioconverter/converters/a18/` of the
+  [archived Talking Book source](https://storage.googleapis.com/google-code-archive-source/v2/code.google.com/talkingbook/source-archive.zip).
+  Binary SHA-256 is
+  `d1d6d014de54bee1f5df5ef8ef800086b09c030c97aadf5b299c4b1696169ec9`.
+  Its exported `a3600_dec_frame` (RVA `0x17b0`) selects a five-bit filter
+  index, uses two previous signed samples and a table of coefficients in
+  sixty-fourths, truncates each prediction product toward zero separately,
+  adds the sign-extended/shifted residual, and clips to signed 16-bit.
+  The old model treated the filter index as a signed coefficient and divided
+  it by 4096, effectively dropping prediction. The decoder is reimplemented
+  from those operations and numeric parameters; no vendor executable or code
+  is distributed in this repository or the app.
+- **Independent regression oracle** — Executed the original x86 frame routine
+  under Unicorn with synthetic input. All 32 filter indices and all 16 shift
+  values match exactly across 512 frames / 16,384 samples, including both
+  residual signs and saturation. The committed 256-sample fixture covers
+  every filter with nonzero history; additional regressions cover partial
+  blocks, header termination, valid `0xffff` residuals, clipping and PCM
+  sustain transitions. This avoids deriving expected results from our SDK.
+- **Launch correction** — A transient MBA overlay no longer forces a
+  diagnostic two-second watchdog at application entry. The retail G1 loader
+  leaves it disabled. The artificial watchdog reset G1 at instruction
+  271,290,081. Normal and follow-up launches now preserve firmware-programmed
+  watchdog state; the explicitly configured diagnostic handoff still works.
+  The unpatched game reaches its race and continues through 750 million
+  instructions without that artificial reset.
+- **Remaining physical validation** — The supplied 40-test recording confirms
+  the earlier PCM pitch/gain work, not ADPCM36. The older probe's ADPCM36
+  headers omitted the framing flags/count and were silent on the device.
+  The corrected decoder agrees with Generalplus software and the game's
+  frame structure, but real-console rounding, analog output, compressor,
+  pitch bend and the complete music mix have not yet been compared against a
+  matching hardware gameplay recording.

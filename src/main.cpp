@@ -104,7 +104,10 @@ int main(int argc, char **argv) {
           mba_overlay = apply_mba_overlay(
               bus.nand.bytes, read_file_bytes(opt.mba), opt.mba_target);
           const MbaOverlayReport &overlay = *mba_overlay;
-          bus.configure_mba_application_target(overlay.entry_address, true);
+          // An overlay changes the file loaded by firmware, not the hardware
+          // watchdog state inherited by the application. Retail MBAs can
+          // legitimately start with the watchdog disabled by their loader.
+          bus.configure_mba_application_target(overlay.entry_address, false);
           std::cout << "Applied transient MBA overlay: "
                     << path_to_utf8(opt.mba) << " (" << overlay.mba_bytes
                     << " bytes, target=" << mba_target_name(overlay.target)

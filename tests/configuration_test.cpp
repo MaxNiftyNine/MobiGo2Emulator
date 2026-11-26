@@ -324,6 +324,17 @@ void test_selected_mba_entry_is_pinned() {
                 selected.mba_watchdog_entry == UINT32_MAX,
             "selected-overlay watchdog leaked into the follow-up MBA");
 
+    Bus normal;
+    normal.configure_mba_application_target(expected, false);
+    normal.maybe_begin_mba_application(expected, 0x6ffd);
+    normal.write(0x780a, 0x8003);
+    const uint64_t deadline = normal.watchdog_expire_cycles;
+    dma_mba_header(normal, unrelated);
+    require(normal.watchdog_enabled &&
+                normal.mmio[0x780a - kMmioBase] == 0x8003 &&
+                normal.watchdog_expire_cycles == deadline,
+            "normal follow-up launch changed the firmware's watchdog");
+
     Bus discovered;
     dma_mba_header(discovered, unrelated);
     require(discovered.mba_application_entry == unrelated,

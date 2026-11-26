@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include "adpcm36_reference.hpp"
 
 using namespace mobigo;
 
@@ -235,6 +236,176 @@ static void test_spu_restart_between_audio_pumps() {
     assert((bus.mmio[0x7b8f - kMmioBase] & 1) == 0);
 }
 
+static void test_spu_loop_has_no_extra_sample() {
+    Bus bus;
+    Audio audio;
+    constexpr uint32_t wave = 0x1000;
+    bus.mem[wave] = 0x9000;
+    bus.mem[wave + 1] = 0xa000;
+    bus.mem[wave + 2] = 0xffff;
+    Audio::channel_reg(bus, 0, 0) = wave;
+    Audio::channel_reg(bus, 0, 1) = 0x6000;
+    Audio::channel_reg(bus, 0, 2) = wave;
+    audio.start_channel(bus, 0);
+    for (unsigned i = 0; i < 128; ++i) {
+        assert(audio.fetch_sample(bus, 0));
+        assert(audio.channels[0].current == (i % 2 ? 0xa000 : 0x9000));
+    }
+    // An empty loop must return promptly and keep its address bounded.
+    bus.mem[wave] = 0xffff;
+    audio.channels[0].wave_addr = wave;
+    assert(!audio.fetch_sample(bus, 0));
+    assert(audio.channels[0].wave_addr == wave);
+}
+
+static void test_spu_pcm8_byte_terminators() {
+    for (const uint16_t word : {0xff80, 0x80ff}) {
+        Bus bus;
+        Audio audio;
+        bus.mem[0x1000] = word;
+        Audio::channel_reg(bus, 0, 0) = 0x1000;
+        Audio::channel_reg(bus, 0, 1) = 0x1000;
+        audio.start_channel(bus, 0);
+        if (word == 0xff80) {
+            assert(audio.fetch_sample(bus, 0));
+            assert(audio.channels[0].current == 0x8080);
+        }
+        assert(!audio.fetch_sample(bus, 0));
+        assert(!audio.channels[0].playing);
+    }
+}
+
+static void test_spu_compressed_attack_enters_pcm_sustain() {
+    for (const uint16_t format : {0x0000, 0xbe00}) {
+        Bus bus;
+        Audio audio;
+        bus.mem[0x1000] = 0xffff;
+        bus.mem[0x1100] = 0x9000;
+        bus.mem[0x1101] = 0xa000;
+        bus.mem[0x1102] = 0xffff;
+        Audio::channel_reg(bus, 0, 0) = 0x1000;
+        Audio::channel_reg(bus, 0, 1) = 0xe000;
+        Audio::channel_reg(bus, 0, 2) = 0x1100;
+        Audio::channel_reg(bus, 0, 13) = format;
+        audio.start_channel(bus, 0);
+        assert(audio.fetch_sample(bus, 0));
+        assert(audio.channels[0].current == 0x9000);
+        assert(audio.channels[0].wave_addr == 0x1101);
+        assert(audio.channels[0].sample_shift == 0);
+        assert(Audio::channel_reg(bus, 0, 1) == 0x6000);
+        assert(Audio::channel_reg(bus, 0, 13) == format);
+        assert(audio.fetch_sample(bus, 0));
+        assert(audio.channels[0].current == 0xa000);
+        assert(audio.fetch_sample(bus, 0));
+        assert(audio.channels[0].current == 0x9000);
+    }
+}
+
+static void test_spu_adpcm36_variable_blocks_and_termination() {
+    Bus bus;
+    Audio audio;
+    const uint16_t words[]{
+        0x8404, 0xffff, // Three residuals of -1, fourth nibble is padding.
+        0xc804, 0x4321, 0xfff5, // Five residuals, including partial last word.
+        0xffff, 0xbe00, 0x7777 // End at the header, without decoding beyond it.
+    };
+    std::copy(std::begin(words), std::end(words), bus.mem.begin() + 0x1000);
+    Audio::channel_reg(bus, 0, 0) = 0x1000;
+    Audio::channel_reg(bus, 0, 1) = 0xd000;
+    Audio::channel_reg(bus, 0, 13) = 0xbe00;
+    audio.start_channel(bus, 0);
+    for (const int sample : {-256,-256,-256,256,512,768,1024,1280}) {
+        assert(audio.fetch_sample(bus, 0));
+        assert(audio.channels[0].current == Audio::unsigned_sample(sample));
+    }
+    assert(audio.channels[0].wave_addr == 0x1005);
+    assert(!audio.fetch_sample(bus, 0));
+    assert(!audio.channels[0].playing);
+    assert(Audio::spu_ctrl(bus, 0, 0x0b) & 1);
+}
+
+static void test_spu_adpcm36_prediction_against_vendor_decoder() {
+    Audio audio;
+    constexpr std::array<uint8_t, 8> residuals{1,9,2,14,7,8,0,15};
+    for (unsigned filter = 0; filter < kAdpcm36Reference.size(); ++filter) {
+        Audio::Channel channel;
+        channel.adpcm36_previous = {1001, -2003};
+        channel.adpcm36_header = uint16_t(0x8e03 | (filter << 4));
+        for (unsigned n = 0; n < residuals.size(); ++n) {
+            assert(audio.decode_adpcm36(channel, residuals[n]) ==
+                   Audio::unsigned_sample(kAdpcm36Reference[filter][n]));
+        }
+    }
+    for (const int sign : {-1, 1}) {
+        Audio::Channel channel;
+        channel.adpcm36_header = 0xbe50;
+        const uint8_t residual = sign < 0 ? 8 : 7;
+        assert(audio.decode_adpcm36(channel, residual) ==
+               Audio::unsigned_sample(sign < 0 ? -32768 : 28672));
+        for (unsigned i = 1; i < 32; ++i)
+            assert(audio.decode_adpcm36(channel, residual) ==
+                   Audio::unsigned_sample(sign < 0 ? -32768 : 32767));
+    }
+}
+
+static void configure_constant_voice(Bus &bus, Audio &audio, unsigned channel,
+                                     int16_t sample) {
+    Audio::channel_reg(bus, channel, 3) = 127; // Full-left pan, volume 127.
+    Audio::channel_reg(bus, channel, 5) = 127;
+    Audio::channel_reg(bus, channel, 9) = uint16_t(sample) ^ 0x8000;
+    Audio::channel_reg(bus, channel, 11) = uint16_t(sample) ^ 0x8000;
+    Audio::spu_ctrl(bus, channel / 16, 0x15) |= Audio::channel_mask(channel);
+    audio.start_channel(bus, channel);
+}
+
+static void test_spu_hardware_gain_steps() {
+    Bus bus;
+    Audio audio;
+    configure_constant_voice(bus, audio, 0, 8192);
+    Audio::spu_ctrl(bus, 0, 1) = 127;
+    std::array<int32_t, 4> level{};
+    for (unsigned setting = 0; setting < 4; ++setting) {
+        Audio::spu_ctrl(bus, 0, 0x0d) = uint16_t(setting << 6);
+        level[setting] = audio.mix_spu(bus, audio.prepare_mix(bus)).first;
+    }
+    // Related-chip VOLSEL documentation and the captured x4/x2 upper steps.
+    assert(std::abs(level[1] - 4 * level[0]) <= 4);
+    assert(std::abs(level[2] - 4 * level[1]) <= 4);
+    assert(std::abs(level[3] - 2 * level[2]) <= 2);
+    assert(level[2] > 7900 && level[2] < 8192);
+}
+
+static void test_spu_saturation_control() {
+    for (const int16_t sample : {20000, -20000}) {
+        Bus bus;
+        Audio audio;
+        configure_constant_voice(bus, audio, 0, sample);
+        configure_constant_voice(bus, audio, 1, sample);
+        Audio::spu_ctrl(bus, 0, 1) = 127;
+        Audio::spu_ctrl(bus, 0, 0x0d) = 0x0080; // Unity, saturation disabled.
+        const auto wrapped = audio.mix_spu(bus, audio.prepare_mix(bus)).first;
+        assert(sample > 0 ? wrapped < 0 : wrapped > 0);
+        assert(int16_t(Audio::spu_ctrl(bus, 0, 0x12)) == wrapped);
+        Audio::spu_ctrl(bus, 0, 0x0d) |= 0x8000;
+        const auto clipped = audio.mix_spu(bus, audio.prepare_mix(bus)).first;
+        assert(clipped == (sample > 0 ? 32767 : -32768));
+        assert(int16_t(Audio::spu_ctrl(bus, 0, 0x12)) == clipped);
+    }
+}
+
+static void test_spu_envelope_preserves_half_tick() {
+    Bus bus;
+    Audio audio;
+    Audio::spu_ctrl(bus, 0, 0x15) = 1; // Manual envelope isolates its clock.
+    for (unsigned i = 0; i < Audio::kRequestedRate; ++i)
+        audio.service_envelope(bus, 0);
+    // The 281250/4 Hz envelope clock advances by 70312.5 ticks per second.
+    assert(audio.channels[0].service_accum == Audio::kRequestedRate * 2);
+    for (unsigned i = 0; i < Audio::kRequestedRate; ++i)
+        audio.service_envelope(bus, 0);
+    assert(audio.channels[0].service_accum == 0);
+}
+
 static void test_mobigo_output_gate() {
     Bus bus;
     Audio audio;
@@ -340,6 +511,14 @@ int main() {
     test_shared_dac_fifo_routing();
     test_spu_pcm16_oneshot();
     test_spu_restart_between_audio_pumps();
+    test_spu_loop_has_no_extra_sample();
+    test_spu_pcm8_byte_terminators();
+    test_spu_compressed_attack_enters_pcm_sustain();
+    test_spu_adpcm36_variable_blocks_and_termination();
+    test_spu_adpcm36_prediction_against_vendor_decoder();
+    test_spu_hardware_gain_steps();
+    test_spu_saturation_control();
+    test_spu_envelope_preserves_half_tick();
     test_mobigo_output_gate();
     test_spu_beat_irq_and_fiq_routing();
     std::cout << "audio tests passed\n";
