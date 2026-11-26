@@ -283,16 +283,9 @@ int main(int argc, char **argv) {
                   << "\n";
           }
         };
-        auto update_host_audio_state = [&]() {
-          if (!audio.device)
-            return;
-          SDL_PauseAudioDevice(audio.device, paused || muted ? 1 : 0);
-          if (paused || muted)
-            SDL_ClearQueuedAudio(audio.device);
-        };
         auto toggle_pause = [&]() {
           paused = !paused;
-          update_host_audio_state();
+          audio.set_host_suspended(paused || muted);
 #ifndef __EMSCRIPTEN__
           realtime.rebase();
 #endif
@@ -310,7 +303,7 @@ int main(int argc, char **argv) {
           audio.reset_timeline(bus);
           powered_off = false;
           paused = false;
-          update_host_audio_state();
+          audio.set_host_suspended(muted);
 #ifndef __EMSCRIPTEN__
           realtime.rebase();
 #endif
@@ -399,8 +392,7 @@ int main(int argc, char **argv) {
                   continue;
                 case SDLK_F4:
                   muted = !muted;
-                  audio.set_muted(muted);
-                  update_host_audio_state();
+                  audio.set_host_suspended(paused || muted);
                   SDL_SetWindowTitle(video.win,
                                      (session_title + (muted ? " - Muted" : "")).c_str());
                   continue;
@@ -493,8 +485,6 @@ int main(int argc, char **argv) {
           uint64_t pace_segment_clock = bus.system_clock_hz();
           uint64_t pace_clock_generation = bus.clock_change_generation;
           auto account_pace_segment = [&]() {
-            if (!realtime.enabled && !speed_measurement.enabled)
-              return;
             if (bus.cycles >= pace_segment_cycles) {
               const uint64_t elapsed_cycles = bus.cycles - pace_segment_cycles;
               realtime.advance_cycles(elapsed_cycles, pace_segment_clock);
@@ -544,11 +534,13 @@ int main(int argc, char **argv) {
               }
             }
             cpu.step();
-            if ((realtime.enabled || speed_measurement.enabled) &&
-                bus.clock_change_generation != pace_clock_generation) {
+            if (bus.clock_change_generation != pace_clock_generation) {
               // The clock-writing instruction completes under the old
               // clock; subsequent instructions use the new selection.
+              audio.pump(bus, pace_segment_clock);
               account_pace_segment();
+            } else {
+              audio.pump_if_due(bus);
             }
             if (bus.system_reset_requested) {
               account_pace_segment();
@@ -560,6 +552,7 @@ int main(int argc, char **argv) {
               } else {
                 bus.system_reset(false);
                 apply_board_settings();
+                audio.reset_timeline(bus);
               }
               const uint32_t start = bus.read(0x00fff7);
               cpu.reset_core(start);
@@ -583,6 +576,7 @@ int main(int argc, char **argv) {
                 account_pace_segment();
                 bus.system_reset();
                 apply_board_settings();
+                audio.reset_timeline(bus);
                 const uint32_t start = bus.read(0x00fff7);
                 cpu.reset_core(start);
                 if (g_log) {
@@ -607,7 +601,7 @@ int main(int argc, char **argv) {
           }
 
           account_pace_segment();
-          audio.pump(bus);
+          const bool audio_reserve_low = audio.flush_host_output();
 
           open_window_if_due();
           const auto now = std::chrono::steady_clock::now();
@@ -654,7 +648,10 @@ int main(int argc, char **argv) {
                     << "\n";
             }
           }
-          realtime.wait_until_current();
+          if (realtime.enabled && opt.speed_percent == 100 && audio_reserve_low)
+            realtime.rebase();
+          else
+            realtime.wait_until_current();
           return !quit && !cpu.halted;
         };
 

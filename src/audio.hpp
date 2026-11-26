@@ -11,6 +11,7 @@ namespace mobigo {
 struct Audio {
     static constexpr uint32_t kRequestedRate = 48000;
     static constexpr size_t kHostQueueFrames = 256;
+    static constexpr Uint32 kHostFrameBytes = 2 * sizeof(int16_t);
     static constexpr uint64_t kSpuServiceRate = 281250;
     static constexpr uint64_t kSpuOutputRate = kSpuServiceRate / 4;
     static constexpr uint64_t kPhaseScale = 1u << 19;
@@ -70,7 +71,9 @@ struct Audio {
     std::vector<int16_t> output;
     std::vector<int16_t> host_staging;
     uint64_t last_cycles = 0;
+    uint64_t next_mix_cycle = 0;
     uint64_t frame_phase = 0;
+    uint64_t frame_phase_clock = 1;
     uint64_t direct_phase_a = 0;
     uint64_t direct_phase_b = 0;
     uint32_t reset_count = 0;
@@ -79,7 +82,8 @@ struct Audio {
     int16_t direct_b = 0;
     uint32_t active_channels = 0;
     bool timeline_started = false;
-    bool muted = false;
+    bool host_suspended = false;
+    bool host_playing = false;
 
     struct MixCache {
         uint32_t active = 0;
@@ -102,15 +106,15 @@ struct Audio {
         wanted.format = AUDIO_S16SYS;
         wanted.channels = 2;
         wanted.samples = 1024;
-        device = SDL_OpenAudioDevice(nullptr, 0, &wanted, &obtained,
-                                     SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+        // Keep the mixer rate fixed even if a deferred window opens on a
+        // device with a different native rate. SDL handles conversion.
+        device = SDL_OpenAudioDevice(nullptr, 0, &wanted, &obtained, 0);
         if (!device) {
             std::cerr << "warning: failed to open audio device: " << SDL_GetError() << "\n";
             SDL_QuitSubSystem(SDL_INIT_AUDIO);
             return;
         }
         host_staging.reserve(kHostQueueFrames * 2);
-        SDL_PauseAudioDevice(device, 0);
     }
 
     void shutdown() {
@@ -119,12 +123,18 @@ struct Audio {
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
     }
 
-    void set_muted(bool should_mute) {
-        muted = should_mute;
+    void clear_host_output() {
         host_staging.clear();
+        host_playing = false;
         if (!device) return;
+        SDL_PauseAudioDevice(device, 1);
         SDL_ClearQueuedAudio(device);
-        SDL_PauseAudioDevice(device, muted ? 1 : 0);
+    }
+
+    void set_host_suspended(bool suspended) {
+        if (host_suspended == suspended) return;
+        host_suspended = suspended;
+        if (suspended) clear_host_output();
     }
 
     uint32_t rate() const {
@@ -178,16 +188,16 @@ struct Audio {
 
     void reset_timeline(Bus &bus) {
         for (Channel &channel : channels) channel = Channel{};
-        last_cycles = bus.cycles;
+        last_cycles = next_mix_cycle = bus.cycles;
         frame_phase = 0;
+        frame_phase_clock = 1;
         direct_phase_a = direct_phase_b = 0;
         direct_a = direct_b = 0;
         active_channels = 0;
-        host_staging.clear();
+        clear_host_output();
         reset_count = bus.power_reset_count;
         logged_output_peak = 0;
         timeline_started = false;
-        if (device) SDL_ClearQueuedAudio(device);
     }
 
     bool hardware_active(Bus &bus) const {
@@ -263,8 +273,13 @@ struct Audio {
     }
 
     void sync_channels(Bus &bus) {
-        for (unsigned index = 0; index < channels.size(); ++index) {
-            const bool enabled = channel_bit(bus, index, 0x00);
+        const uint32_t enabled_mask = uint32_t(spu_ctrl(bus, 0, 0x00)) |
+                                      (uint32_t(spu_ctrl(bus, 1, 0x00)) << 16);
+        uint32_t remaining = enabled_mask | active_channels;
+        while (remaining) {
+            const unsigned index = std::countr_zero(remaining);
+            remaining &= remaining - 1;
+            const bool enabled = (enabled_mask & (uint32_t(1) << index)) != 0;
             const bool stopped = channel_bit(bus, index, 0x0b);
             if (!enabled) {
                 if (channels[index].playing) stop_channel(bus, index, false);
@@ -524,7 +539,7 @@ struct Audio {
         return {left, right};
     }
 
-    static uint32_t dac_source_rate(Bus &bus) {
+    static uint32_t dac_source_rate(Bus &bus, uint64_t clock) {
         const uint16_t ctrl = bus.mmio[0x78f0 - kMmioBase];
         if (ctrl & 0x0400) {
             static constexpr std::array<uint32_t, 9> rates{
@@ -535,7 +550,7 @@ struct Audio {
         }
         const uint16_t timer = bus.mmio[0x78e0 - kMmioBase];
         if ((timer & 0x2000) == 0) return 0;
-        return uint32_t(bus.timer_effective_hz(timer, bus.system_clock_hz()) / 2);
+        return uint32_t(bus.timer_effective_hz(timer, clock) / 2);
     }
 
     void consume_fifo(Bus &bus, bool channel_b) {
@@ -579,11 +594,10 @@ struct Audio {
         return {direct_a, direct_a};
     }
 
-    void render(Bus &bus, uint64_t frames) {
+    void render(Bus &bus, uint64_t frames, uint32_t source_rate) {
         output.clear();
         output.reserve(size_t(frames) * 2);
         const MixCache cache = prepare_mix(bus);
-        const uint32_t source_rate = dac_source_rate(bus);
         const bool output_gate =
             (bus.mmio[0x78ff - kMmioBase] & 0x0001) != 0;
         for (uint64_t i = 0; i < frames; ++i) {
@@ -608,23 +622,65 @@ struct Audio {
         }
     }
 
-    void queue_host_output() {
-        if (!device || muted || output.empty()) return;
-        host_staging.insert(host_staging.end(), output.begin(), output.end());
-        if (host_staging.size() < kHostQueueFrames * 2) return;
-        if (SDL_QueueAudio(device, host_staging.data(),
-                           Uint32(host_staging.size() * sizeof(host_staging.front()))) != 0) {
-            die(std::string("failed to queue audio: ") + SDL_GetError());
-        }
-        host_staging.clear();
+    Uint32 host_prebuffer_bytes() const {
+        // Several device periods cover presentation stalls and scheduler jitter.
+        return std::max(3u * obtained.samples, rate() * 40 / 1000) * kHostFrameBytes;
     }
 
-    void pump(Bus &bus) {
+    // Returns true when playback is running with a low reserve. The normal
+    // speed limiter can then skip a sleep to absorb host clock drift.
+    bool flush_host_output() {
+        if (!device || host_suspended) return false;
+        Uint32 queued = SDL_GetQueuedAudioSize(device);
+        if (host_playing && queued == 0) {
+            SDL_PauseAudioDevice(device, 1);
+            host_playing = false;
+        }
+        if (host_staging.size() >= kHostQueueFrames * 2) {
+            const auto bytes = Uint32(host_staging.size() * sizeof(int16_t));
+            if (SDL_QueueAudio(device, host_staging.data(), bytes) != 0) {
+                die(std::string("failed to queue audio: ") + SDL_GetError());
+            }
+            host_staging.clear();
+            queued = SDL_GetQueuedAudioSize(device);
+        }
+
+        const Uint32 prebuffer = host_prebuffer_bytes();
+        if (!host_playing && queued >= prebuffer) {
+            SDL_PauseAudioDevice(device, 0);
+            host_playing = true;
+        }
+        const Uint32 queue_limit = std::max(prebuffer, rate() * kHostFrameBytes / 8);
+        while (host_playing && queued > queue_limit) {
+            SDL_Delay(1);
+            queued = SDL_GetQueuedAudioSize(device);
+        }
+        return host_playing && queued < prebuffer - obtained.samples * kHostFrameBytes;
+    }
+
+    void rescale_frame_phase(uint64_t clock) {
+        if (clock == frame_phase_clock) return;
+        frame_phase = uint64_t(static_cast<unsigned __int128>(frame_phase) * clock /
+                               frame_phase_clock);
+        frame_phase_clock = clock;
+    }
+
+    void pump(Bus &bus, uint64_t elapsed_clock) {
         if (reset_count != bus.power_reset_count || bus.cycles < last_cycles) {
             reset_timeline(bus);
         }
+        const uint64_t elapsed = bus.cycles - last_cycles;
+        last_cycles = bus.cycles;
+        const uint64_t clock = bus.system_clock_hz();
+        const uint32_t source_rate = dac_source_rate(bus, clock);
+        const bool dac_enabled = ((bus.mmio[0x78f0 - kMmioBase] |
+                                  bus.mmio[0x78f8 - kMmioBase]) & 0x2000) != 0;
+        // A direct DAC stream has only 16 FIFO slots. Service it at every
+        // output frame so refill interrupts reach the guest within a CPU batch.
+        const uint64_t mix_frames = dac_enabled && source_rate ? 1 : 4;
         if (!timeline_started) {
-            last_cycles = bus.cycles;
+            next_mix_cycle = bus.cycles + Bus::cycles_until_source_ticks(
+                mix_frames, 0, rate(), clock);
             if (!hardware_active(bus)) return;
             timeline_started = true;
             sync_channels(bus);
@@ -637,25 +693,25 @@ struct Audio {
         // scan to ordinary frame-producing pumps.
         sync_channels(bus);
 
-        const uint64_t elapsed = bus.cycles - last_cycles;
-        last_cycles = bus.cycles;
-        const uint64_t clock = bus.system_clock_hz();
-        const unsigned __int128 total = static_cast<unsigned __int128>(frame_phase) +
-                                        static_cast<unsigned __int128>(elapsed) * rate();
-        const uint64_t frames = uint64_t(total / clock);
-        frame_phase = uint64_t(total % clock);
+        rescale_frame_phase(elapsed_clock);
+        const uint64_t frames = Bus::accumulate_source_ticks(frame_phase, elapsed,
+                                                            rate(), elapsed_clock);
         if (frames) {
-            render(bus, frames);
-            queue_host_output();
+            render(bus, frames, clock == elapsed_clock ? source_rate
+                                                      : dac_source_rate(bus, elapsed_clock));
+            if (device && !host_suspended) {
+                host_staging.insert(host_staging.end(), output.begin(), output.end());
+            }
         }
+        rescale_frame_phase(clock);
+        next_mix_cycle = bus.cycles + Bus::cycles_until_source_ticks(
+            mix_frames, frame_phase, rate(), clock);
+    }
 
-        // Keep audible runs close to real time and cap latency. Startup before
-        // the first hardware audio enable remains unthrottled.
-        const Uint32 bytes_per_second = rate() * 2 * sizeof(int16_t);
-        while (device && !muted &&
-               SDL_GetQueuedAudioSize(device) > bytes_per_second / 8) {
-            SDL_Delay(1);
-        }
+    void pump(Bus &bus) { pump(bus, bus.system_clock_hz()); }
+
+    void pump_if_due(Bus &bus) {
+        if (bus.cycles >= next_mix_cycle) pump(bus);
     }
 };
 

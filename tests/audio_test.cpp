@@ -39,6 +39,96 @@ static void test_dac_fifo_drain() {
                        [](int16_t sample) { return sample != 0; }));
 }
 
+static void test_dac_refills_during_cpu_batch() {
+    Bus bus;
+    Audio audio;
+    bus.write(0x78f2, 0x0110); // Refill interrupt when the FIFO is empty.
+    bus.write(0x78f0, 0x6401); // DAC A at 48 kHz with its FIFO interrupt enabled.
+    bus.write(0x78a4, 0x0010); // Route the refill interrupt to FIQ.
+    bus.write(0x78ff, 1);
+
+    uint16_t next_sample = 0x8001;
+    const auto refill = [&] {
+        for (unsigned i = 0; i < 16; ++i) bus.write(0x78f1, next_sample++);
+    };
+    refill();
+    audio.pump_if_due(bus);
+
+    // A regular CPU batch spans several complete FIFO refills. Model a guest
+    // that services the interrupt as it becomes visible between instructions.
+    unsigned refills = 0;
+    for (int i = 0; i < kDefaultInstructionBatch; ++i) {
+        bus.cycles += 2;
+        audio.pump_if_due(bus);
+        if (bus.audio_fiq_asserted_no_update()) {
+            refill();
+            ++refills;
+        }
+    }
+    assert(refills > 1);
+    assert((bus.read(0x78f2) & 0x4000) == 0);
+    assert(audio.direct_a == int16_t(bus.cycles * audio.rate() / bus.system_clock_hz()));
+}
+
+static void test_audio_phase_across_clock_change() {
+    Bus bus;
+    Audio audio;
+    bus.write(0x7807, 0); // 12 MHz.
+    bus.write(0x78f0, 0x2401);
+    bus.write(0x78ff, 1);
+    bus.write(0x78f1, 0x9000);
+    audio.pump_if_due(bus);
+
+    const uint64_t old_clock = bus.system_clock_hz();
+    bus.cycles = 125; // Half a frame at 12 MHz.
+    bus.write(0x7807, 1); // Divide SYSCLK by two.
+    audio.pump(bus, old_clock);
+    bus.cycles += 62; // Just short of the other half at 6 MHz.
+    audio.pump_if_due(bus);
+    assert(bus.audio_fifo_level_a == 1);
+    ++bus.cycles;
+    audio.pump_if_due(bus);
+    assert(bus.audio_fifo_level_a == 0);
+    assert(audio.direct_a == 0x1000);
+}
+
+static void test_host_audio_prebuffer() {
+    assert(SDL_setenv("SDL_AUDIODRIVER", "dummy", 1) == 0);
+    Audio audio;
+    audio.init();
+    assert(audio.device != 0);
+    assert(SDL_GetAudioDeviceStatus(audio.device) == SDL_AUDIO_PAUSED);
+
+    const auto queue_frames = [&](size_t frames) {
+        audio.host_staging.insert(audio.host_staging.end(), 2 * frames, 123);
+        audio.flush_host_output();
+    };
+    const size_t block = Audio::kHostQueueFrames;
+    const size_t prebuffer = audio.host_prebuffer_bytes() / Audio::kHostFrameBytes;
+    queue_frames(block);
+    assert(SDL_GetAudioDeviceStatus(audio.device) == SDL_AUDIO_PAUSED);
+    assert(SDL_GetQueuedAudioSize(audio.device) == block * Audio::kHostFrameBytes);
+    queue_frames(prebuffer - block);
+    assert(SDL_GetAudioDeviceStatus(audio.device) == SDL_AUDIO_PLAYING);
+
+    // Simulate a drained queue without relying on real-time sleeps.
+    SDL_ClearQueuedAudio(audio.device);
+    queue_frames(block);
+    assert(SDL_GetAudioDeviceStatus(audio.device) == SDL_AUDIO_PAUSED);
+    queue_frames(prebuffer - block);
+    assert(SDL_GetAudioDeviceStatus(audio.device) == SDL_AUDIO_PLAYING);
+
+    queue_frames(1); // A partial block sitting outside SDL.
+    audio.set_host_suspended(true);
+    assert(audio.host_staging.empty());
+    assert(SDL_GetQueuedAudioSize(audio.device) == 0);
+    audio.set_host_suspended(false);
+    queue_frames(block);
+    assert(SDL_GetAudioDeviceStatus(audio.device) == SDL_AUDIO_PAUSED);
+    assert(SDL_GetQueuedAudioSize(audio.device) == block * Audio::kHostFrameBytes);
+    audio.shutdown();
+}
+
 static void test_shared_dac_fifo_routing() {
     Bus bus;
     bus.write(0x78f8, 0x1800); // SSF+CHACFG: alternate CHA_Data into A/B.
@@ -241,8 +331,12 @@ static void test_spu_beat_irq_and_fiq_routing() {
 }
 
 int main() {
+    SDL_SetMainReady();
     test_dac_interrupt_enable_gating();
     test_dac_fifo_drain();
+    test_dac_refills_during_cpu_batch();
+    test_audio_phase_across_clock_change();
+    test_host_audio_prebuffer();
     test_shared_dac_fifo_routing();
     test_spu_pcm16_oneshot();
     test_spu_restart_between_audio_pumps();
