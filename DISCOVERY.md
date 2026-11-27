@@ -933,3 +933,21 @@ assembled NAND is `firmware/nand.bin`.
   compressed blocks; exact hardware decoder-state preservation during these
   enable transitions remains unverified. This correction establishes the
   sample/envelope memory source, not every analog, compressor or restart edge.
+
+## Menu name arch transition, 2026-11-26
+
+- User hardware observation: the blue name arch slides upward out of view
+  when an application is selected and does not return from the bottom.
+- Reproduced with the system menu, touching Hamster Highway at instruction
+  410 million. At 440 million the extended text overlay has Y scroll 109;
+  the former renderer wraps its source coordinate modulo 256 and repeats the
+  arch near the bottom. Existing signed sprite clipping does not affect it.
+- The extended text engines at 0x7000 and 0x7008 now clip vertically beyond
+  the source page. Ordinary text engines retain circular scrolling. The
+  captured 440-million-instruction frame no longer contains the lower arch.
+- This extended-engine clipping rule is inferred from the supplied hardware
+  observation and the firmware transition, not independently documented for
+  every transform mode. Related SPG documentation explicitly permits ordinary
+  text wrapping, which is why the correction preserves that path.
+- A synthetic regression covers both extended engines, a partially visible
+  source page, and ordinary text wrapping beyond the same boundary.

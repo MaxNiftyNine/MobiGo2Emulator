@@ -594,6 +594,30 @@ static void test_ppu_fade_lookup() {
             "PPU fade register did not subtract one RGB level");
 }
 
+static void test_extended_text_scroll_clips_vertical_page_edge() {
+    Bus bus;
+    Video video;
+    bus.mmio[0x707f - kMmioBase] = 0x0042;
+    bus.mmio[0x7023 - kMmioBase] = 0x1000;
+    bus.palette_ram[0] = 0x001f;
+    std::fill(bus.mem.begin() + 0x2000, bus.mem.begin() + 0x2800, 1);
+    for (const uint32_t scroll : {0x7000u, 0x7008u, 0x7010u}) {
+        const bool extended = scroll != 0x7010;
+        const uint32_t attr = scroll + (extended ? 4 : 2);
+        bus.mmio[scroll + 1 - kMmioBase] = 250;
+        bus.mmio[attr - kMmioBase] = 0;
+        bus.mmio[attr + 1 - kMmioBase] = 0x000a;
+        bus.mmio[attr + 2 - kMmioBase] = 0x2000;
+        for (const int y : {0, 10}) {
+            std::array<uint16_t, Video::W> line{};
+            video.draw_page(bus, line, 0, y, 0x7023, 0x702e,
+                            scroll, attr, attr + 1, attr + 2, attr + 3);
+            require(line[0] == ((extended && y == 10) ? 0 : 0x001f),
+                    "extended text must clip at the page edge while ordinary text wraps");
+        }
+    }
+}
+
 static void test_centered_sprite_coordinates_clip_without_wrapping() {
     Bus bus;
     Video video;
@@ -703,6 +727,7 @@ int main() {
     test_dma_loaded_mba_header_registers_entry();
     test_ppu_blend_levels_and_direct_color_transparency();
     test_ppu_fade_lookup();
+    test_extended_text_scroll_clips_vertical_page_edge();
     test_centered_sprite_coordinates_clip_without_wrapping();
     std::cout << "hardware accuracy tests passed\n";
     return 0;

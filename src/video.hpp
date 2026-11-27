@@ -321,6 +321,12 @@ struct Video {
         const uint32_t screen_width = (attr & 0x8000) ? 640 : 320;
         const uint32_t tile_count_x = total_width / tile_w;
         const uint32_t ymask = (((attr & 0x8000) ? 0x200 : 0x100) << ((attr & 0x4000) ? 1 : 0)) - 1;
+        // Hardware-observed on MobiGo 2's translated menu overlay: the
+        // extended text engines clip past the source page's vertical edge.
+        // Applying the ordinary text engines' circular addressing here makes
+        // an overlay sliding upward reappear at the bottom of the LCD.
+        const bool extended_text = scroll_reg == 0x7000 || scroll_reg == 0x7008;
+        if (extended_text && logical_scanline + yscroll > ymask) return;
         const uint32_t bitmap_y = (logical_scanline + yscroll) & ymask;
         const uint32_t y0 = bitmap_y / tile_h;
         const uint32_t tile_scanline = bitmap_y % tile_h;
